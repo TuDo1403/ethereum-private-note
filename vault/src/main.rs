@@ -9,6 +9,8 @@
 //! Nothing here is needed to restore: `recover` and SPEC.md stand alone.
 
 mod backup;
+#[allow(dead_code)] // used from Task 6
+mod layout;
 mod onepassword;
 mod prompt;
 mod restore;
