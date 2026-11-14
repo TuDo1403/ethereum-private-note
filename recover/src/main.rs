@@ -6,9 +6,11 @@ use epn_core::{bip39::share_from_words, fido, record, unhex};
 use std::io::Read;
 
 const USAGE: &str = "usage:
-  recover restore <record-hex> [--key X=CRED_ID]... [--device PATH]  < factors
+  recover restore <record-hex> [--key X=CRED_ID[@PATH]]... [--device PATH]  < factors
 Run it alone and type the factors on stdin, then Ctrl-D; never put a factor inside a command line (shell
-history keeps it). --key reads the YubiKey that is share X (PIN and touch). stdin has one factor per
+history keeps it). --key reads the YubiKey that is share X (PIN and touch). With two or more YubiKeys
+plugged in, give each its own device as --key X=CRED_ID@PATH (find paths with `fido2-token -L`);
+without @PATH a key uses --device, else the only key found. stdin has one factor per
 line, in any order, blank lines ignored:
   pass <passphrase>          the passphrase, everything after the first space, not trimmed
   paper <X> <24 words>       the paper share printed as share X
@@ -100,13 +102,16 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
     let device = flag(&mut args, "--device")?;
     let mut keys = Vec::new();
     while let Some(k) = flag(&mut args, "--key")? {
-        let (x, cred) = k
-            .split_once('=')
-            .ok_or(Fail::Usage("--key needs X=CRED_ID".into()))?;
-        let x: u8 = x
-            .parse()
-            .map_err(|_| Fail::Usage("--key needs X=CRED_ID with X a number".into()))?;
-        keys.push((x, cred.to_string()));
+        let bad = || Fail::Usage("--key needs X=CRED_ID[@PATH] with X a number".into());
+        let (x, rest) = k.split_once('=').ok_or_else(bad)?;
+        let x: u8 = x.parse().map_err(|_| bad())?;
+        // Base64 has no '@', so the first one starts the device path. An empty path is a typo, not "auto-detect".
+        let (cred, path) = match rest.split_once('@') {
+            Some((_, "")) | Some(("", _)) => return Err(bad()),
+            Some((cred, path)) => (cred, Some(path)),
+            None => (rest, None),
+        };
+        keys.push((x, cred.to_string(), path.map(str::to_string)));
     }
     let [record_hex] = args.as_slice() else {
         return Err(Fail::Usage(
@@ -129,13 +134,14 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
         .chain(keys.iter().map(|k| k.0))
         .collect();
     record::check_factors(&record, f.pass.is_some(), &xs, &f.paper)?;
-    for (_, cred) in &keys {
+    for (_, cred, _) in &keys {
         fido::check_cred_id(cred)?;
     }
-    for (x, cred) in keys {
+    for (x, cred, path) in keys {
         eprintln!("Enter the PIN and touch the YubiKey that is share {x}.");
-        f.hardware
-            .push((x, fido::secret(&cred, device.as_deref())?));
+        // The key's own path, else --device, else auto-detect.
+        let dev = path.as_deref().or(device.as_deref());
+        f.hardware.push((x, fido::secret(&cred, dev)?));
     }
     if f.pass.is_some() {
         eprintln!("Stretching passphrase (Argon2id; takes a while)...");

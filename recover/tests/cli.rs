@@ -233,7 +233,7 @@ fn yubikey_output_is_parsed_strictly() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), f("mnemonic"));
     std::fs::remove_dir_all(dir).unwrap();
     // A bad credential id is refused before the YubiKey is asked for its PIN.
-    let out = cli(&["restore", f("record"), "--key", "2=@@bad"], &stdin);
+    let out = cli(&["restore", f("record"), "--key", "2=!!bad"], &stdin);
     let err = stderr(&out);
     assert!(
         out.status.code() == Some(1) && err.contains("base64") && !err.contains("PIN"),
@@ -251,5 +251,50 @@ fn yubikey_output_is_parsed_strictly() {
         assert_eq!(out.status.code(), Some(1), "{name}: {err}");
         assert!(err.contains("fido2-assert"), "{name}: {err}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn each_key_may_name_its_device() {
+    let v = vector();
+    let f = |k: &str| v[k].as_str().unwrap();
+    let (prf2, prf3) = (
+        base64(&epn_core::unhex(&share(&v, 2, "secret")).unwrap()),
+        base64(&epn_core::unhex(&share(&v, 3, "secret")).unwrap()),
+    );
+    // The fake key answers with the secret of the share whose device path is its last argument (`-p PATH`).
+    let (dir, path) = fake_fido(
+        "devices",
+        &format!(
+            "for a; do dev=$a; done; read h; read rp; read id; read salt
+case $dev in /dev/keyA) s={prf2};; /dev/keyB) s={prf3};; *) exit 1;; esac
+printf '%s\\n' \"$h\" \"$rp\" AQID AQID \"$s\""
+        ),
+    );
+    let stdin = format!("paper 4 {}\n", share(&v, 4, "words"));
+    let args = [
+        "restore",
+        f("record"),
+        "--key",
+        "2=Zm9v@/dev/keyA",
+        "--key",
+        "3=YmFy@/dev/keyB",
+    ];
+    let out = cli_path(&args, &stdin, &path);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), f("mnemonic"));
+    // A path after `@` wins over --device for that key; a key without one still uses --device.
+    let mixed = [&args[..4], &["--key", "3=YmFy", "--device", "/dev/keyB"]].concat();
+    let out = cli_path(&mixed, &stdin, &path);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let mixed = [&args[..], &["--device", "/dev/nothing"]].concat();
+    let out = cli_path(&mixed, &stdin, &path);
+    assert!(out.status.success(), "{}", stderr(&out));
+    std::fs::remove_dir_all(dir).unwrap();
+    // An empty path after `@` is a usage error, not "auto-detect"; so is an empty credential id before it.
+    for key in ["2=Zm9v@", "2=@/dev/keyA"] {
+        let out = cli(&["restore", f("record"), "--key", key], &stdin);
+        assert_eq!(out.status.code(), Some(2), "{key}: {}", stderr(&out));
+        assert!(stderr(&out).contains("--key"), "{key}: {}", stderr(&out));
     }
 }
