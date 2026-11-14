@@ -61,46 +61,49 @@ fn confirm_passphrase(pass: &str) -> Result<(), String> {
     Err("passphrase not confirmed; nothing was saved".into())
 }
 
-/// Three random positions of the 24 share C words must be read back from the paper.
-fn quiz_share_c(words: &str) -> Result<(), String> {
-    let list: Vec<&str> = words.split(' ').collect();
-    assert_eq!(list.len(), 24, "share C is always 24 words");
+/// All 24 share C words must be typed back from the paper and match: a quiz on a few words would let a
+/// miswritten word through, and share C has no other check until the day it is needed.
+fn confirm_share_c(words: &str) -> Result<(), String> {
     for _ in 0..3 {
-        let mut pos: Vec<usize> = Vec::new();
-        while pos.len() < 3 {
-            // 240 = 10 * 24, so rejecting 240..=255 keeps the modulo unbiased.
-            let b = os_random(1)[0];
-            if b < 240 && !pos.contains(&((b % 24) as usize)) {
-                pos.push((b % 24) as usize);
-            }
-        }
-        pos.sort();
         clear();
-        println!("Check your paper copy of share C.");
-        let mut ok = true;
-        for p in pos {
-            ok &= ask(&format!("word #{}: ", p + 1))?.to_lowercase() == list[p];
-        }
-        if ok {
+        println!("Now type share C back from your paper, all 24 words (hidden).");
+        if *enter_share_c()? == words {
             return Ok(());
         }
-        println!("That did not match.");
-        show_words("Share C again (write it down carefully):", words);
-        pause("Press Enter to be quizzed again.")?;
+        println!("That is not the share C shown: some word on the paper is wrong or out of order.");
+        show_words("Share C again (correct the paper carefully):", words);
+        pause("Press Enter to type it again.")?;
     }
-    Err("share C not confirmed; nothing was saved".into())
+    Err("share C not confirmed".into())
 }
 
-fn sheet(record_hex: &str, cred_id: &str) -> String {
+/// The scripted restore, safe to type: secrets go to hidden `read` prompts, never onto a command line
+/// (where shell history would keep them). Line 1 is share C, line 2 the passphrase; Enter leaves one out.
+const RECOVER_SAFE: &str =
+    "IFS= read -rs C; IFS= read -rs P; printf '%s\\n%s' \"$C\" \"$P\" | recover restore <record>; unset C P";
+
+fn sheet(record: &[u8], cred_id: &str, fingerprint: &str) -> String {
+    let record_hex: String = record.iter().map(|b| format!("{b:02x}")).collect();
     format!(
         "Recovery sheet. Nothing here is secret: keep several copies (paper, email, cloud).\n\n\
-         record:     0x{record_hex}\n\
-         credential: {cred_id}   (YubiKey, rpId localhost)\n\
-         chain id: ________   contract: ________   sender: ________\n\n\
-         read:       cast call $STORE \"records(address)(bytes)\" $SENDER --rpc-url $RPC\n\
-         restore:    printf '%s\\n%s' \"$SHARE_C_WORDS\" \"$PASS\" | recover restore <record> --cred-id {cred_id}\n\
-         format:     SPEC.md (print it with this sheet)\n\n\
-         Any two of: passphrase, YubiKey (+ its PIN), share C restore the seed.\n"
+         record id:        {id}   (SHA-256 of the record, first 8 bytes; `publish` prints the same id)\n\
+         record:           0x{record_hex}\n\
+         seed fingerprint: {fingerprint}   (a verify-only restore must show the same)\n\
+         credential:       {cred_id}   (YubiKey, rpId localhost)\n\n\
+         Where the record is stored on chain:\n\
+         contract:         {BLOBSTORE_ADDRESS}   (BlobStore, the same on every chain)\n\
+         chain id:         ________\n\
+         sender:           __________________________________________\n\n\
+         read:     cast call {BLOBSTORE_ADDRESS} \"records(address)(bytes)\" <sender> --rpc-url <rpc>\n\
+         restore:  vault restore   (guided, hidden prompts; choose \"verify only\" for a test restore)\n\
+         scripted: {RECOVER_SAFE}\n\
+         \x20         (add --cred-id {cred_id} to use the YubiKey; type share C, Enter, passphrase, Enter:\n\
+         \x20         nothing is shown and nothing reaches shell history)\n\
+         format:   SPEC.md (print it with this sheet)\n\n\
+         Any two of: passphrase, YubiKey (+ its PIN), share C restore the seed.\n\
+         Keep a copy of the record (or this sheet) with the contract, chain id, sender and record id in the\n\
+         storage place of each factor too, so any two factors arrive with what they need.\n",
+        id = record_id(record),
     )
 }
 
@@ -170,8 +173,16 @@ fn enter_share_c() -> Result<Zeroizing<String>, String> {
 
 fn restore_flow(device: Option<String>) -> Result<(), String> {
     clear();
-    println!("Restore your seed. You need the record and any TWO of: passphrase, YubiKey (+ its PIN), share C.");
-    println!("Do this on an offline machine: the seed will be shown on this screen.\n");
+    println!("Restore your seed. You need the record and any TWO of: passphrase, YubiKey (+ its PIN), share C.\n");
+    println!("  1. restore: show the seed words (do this offline, nobody watching the screen)");
+    println!("  2. verify only: check two factors and show the seed fingerprint, never the seed\n");
+    let verify_only = loop {
+        match ask("1 or 2: ")?.as_str() {
+            "1" => break false,
+            "2" => break true,
+            _ => {}
+        }
+    };
     let (record, sheet_cred) = read_record()?;
 
     let (use_pass, use_key, use_c) = loop {
@@ -217,6 +228,13 @@ fn restore_flow(device: Option<String>) -> Result<(), String> {
         match opened {
             Ok((words, used)) => {
                 let words = Zeroizing::new(words);
+                if verify_only {
+                    let entropy = Zeroizing::new(words_to_entropy(&words)?);
+                    println!("\nVerified: {used} open the record.");
+                    println!("Seed fingerprint: {}", seed_fingerprint(&entropy));
+                    println!("It must match the fingerprint on your recovery sheet (and the one shown at backup).");
+                    return Ok(());
+                }
                 clear();
                 println!("Restored using {used}. Your seed:\n");
                 show_words("seed:", &words);
@@ -277,15 +295,62 @@ fn run() -> Result<(), String> {
     if mode == "backup" { backup(device) } else { restore_flow(device) }
 }
 
+/// Every file written after a secret was shown goes through here: synced to disk, so a crash right after
+/// cannot lose it, and a failure says plainly that the papers already written belong to no backup.
+fn save(path: &str, contents: &str) -> Result<(), String> {
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()
+    };
+    write().map_err(|e| {
+        format!("cannot write {path}: {e}\nThe backup is NOT saved. Destroy the papers written in this run (passphrase, share C) and start again.")
+    })
+}
+
+/// The seed, typed twice. BIP39's checksum is only 4 bits for 12 words (8 for 24), so a typo that is
+/// another list word ("wave" for "wage") passes it one time in 16 and would be backed up silently.
+/// Both entries must give the same entropy.
+fn enter_seed() -> Result<Zeroizing<Vec<u8>>, String> {
+    for _ in 0..3 {
+        let words = ask_hidden("Type your seed words (hidden, 12 to 24 words): ")?;
+        let first = match words_to_entropy(words.trim()) {
+            Ok(e) => Zeroizing::new(e),
+            Err(e) => {
+                println!("{e}");
+                continue;
+            }
+        };
+        let again = ask_hidden("Type them again, to catch a typo (hidden): ")?;
+        match words_to_entropy(again.trim()).map(Zeroizing::new) {
+            Ok(second) if *second == *first => {
+                println!("Accepted: {} words, both entries match.", words.split_whitespace().count());
+                println!("Seed fingerprint: {}  (note it: a verify-only restore must show the same)", seed_fingerprint(&first));
+                return Ok(first);
+            }
+            _ => println!("The two entries are not the same seed. Start again, slowly."),
+        }
+    }
+    Err("seed not accepted".into())
+}
+
 fn backup(device: Option<String>) -> Result<(), String> {
+    // The output folder is made and test-written before any secret is typed or shown: a read-only or
+    // full disk must stop the backup here, not after the papers exist.
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+    let dir = format!("backup-{stamp}");
+    std::fs::create_dir(&dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+    let probe = format!("{dir}/.write-test");
+    std::fs::write(&probe, "test").and_then(|_| std::fs::remove_file(&probe)).map_err(|e| format!("cannot write in {dir}: {e}"))?;
 
     clear();
     println!("2-of-3 seed backup: passphrase + YubiKey + share C (any two restore your seed).\n");
-    println!("Steps: 1 YubiKey  2 seed  3 passphrase  4 build and check  5 share C  6 save the public files\n");
+    println!("Steps: 1 YubiKey  2 seed  3 passphrase  4 build, check and save the public files  5 share C  6 next steps\n");
     println!("Before you start:");
     println!("  - go OFFLINE (turn off wifi and unplug ethernet) and close other apps");
     println!("  - have paper and a pen ready, and the YubiKey plugged in");
     println!("  - nobody should be able to see the screen\n");
+    println!("The public files will be saved in ./{dir}/ (checked writable).");
     pause("Press Enter when you are offline and ready.")?;
 
     // 1. YubiKey credential
@@ -302,19 +367,7 @@ fn backup(device: Option<String>) -> Result<(), String> {
 
     // 2. seed
     println!("\n2/6 Seed");
-    let mut entropy = None;
-    for _ in 0..3 {
-        let words = ask_hidden("Type your seed words (hidden, 12 to 24 words): ")?;
-        match words_to_entropy(words.trim()) {
-            Ok(e) => {
-                println!("Accepted: {} words, checksum OK.", words.split_whitespace().count());
-                entropy = Some(Zeroizing::new(e));
-                break;
-            }
-            Err(e) => println!("{e}"),
-        }
-    }
-    let entropy = entropy.ok_or("seed not accepted")?;
+    let entropy = enter_seed()?;
 
     // 3. passphrase: generated, shown once, then proven
     let pass = Zeroizing::new(new_passphrase(7, &mut os_random));
@@ -350,32 +403,36 @@ fn backup(device: Option<String>) -> Result<(), String> {
     }
     println!("Self-check passed: every pair of factors opens the record.");
 
+    // Saved now, before share C is shown: once papers exist, the record they belong to must be on disk.
+    let fingerprint = seed_fingerprint(&entropy);
+    let record_hex: String = record.iter().map(|b| format!("{b:02x}")).collect();
+    save(&format!("{dir}/record.hex"), &format!("0x{record_hex}\n"))?;
+    save(&format!("{dir}/recovery-sheet.txt"), &sheet(&record, &cred_id, &fingerprint))?;
+    println!("Saved two PUBLIC files in ./{dir}/ : record.hex and recovery-sheet.txt");
+
     // 5. share C
     let share_words = Zeroizing::new(entropy_to_words(&*share_c));
     println!("\n5/6 Share C (24 words). Write it on paper, in a different place from the passphrase.");
     println!("These 24 words look like a wallet seed but are NOT one. Label the paper \"backup share, not a wallet\".\n");
     show_words("share C:", &share_words);
     println!();
-    pause("Press Enter once it is written down; you will be quizzed on three words.")?;
-    quiz_share_c(&share_words)?;
+    pause("Press Enter once it is written down; you will type all 24 words back.")?;
+    confirm_share_c(&share_words).map_err(|e| {
+        format!("{e}. This backup is NOT usable: delete ./{dir}/, destroy the passphrase and share C papers, and start again.")
+    })?;
     clear();
 
-    // 6. public files
-    let record_hex: String = record.iter().map(|b| format!("{b:02x}")).collect();
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
-    let dir = format!("backup-{stamp}");
-    std::fs::create_dir(&dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
-    std::fs::write(format!("{dir}/record.hex"), format!("0x{record_hex}\n")).map_err(|e| e.to_string())?;
-    std::fs::write(format!("{dir}/recovery-sheet.txt"), sheet(&record_hex, &cred_id)).map_err(|e| e.to_string())?;
-
-    println!("6/6 Saved two PUBLIC files in ./{dir}/ : record.hex and recovery-sheet.txt\n");
-    println!("Next (online, no secrets needed):");
-    println!("  1. send the record to a chain:");
-    println!("       cast send $STORE \"store(bytes)\" $(cat {dir}/record.hex) --rpc-url $RPC --account $SENDER");
-    println!("     (use a fresh sender address that is not derived from your seed)");
-    println!("  2. fill chain id, contract and sender into the recovery sheet; keep several copies");
-    println!("  3. TEST a restore now, with your paper, before you trust this backup:");
-    println!("       printf '%s\\n%s' \"$SHARE_C_WORDS\" \"$PASS\" | recover restore $(cat {dir}/record.hex)");
+    // 6. next steps
+    println!("6/6 Backup made. Seed fingerprint: {fingerprint}   record id: {}\n", record_id(&record));
+    println!("Next:");
+    println!("  1. TEST your papers now, offline: run `vault restore`, choose 2 (verify only) and use the passphrase");
+    println!("     and share C papers. It must show fingerprint {fingerprint}. The seed is never shown.");
+    println!("  2. on an online machine, store the record on a chain (no secrets needed):");
+    println!("       publish <rpc-url> {dir}/record.hex <refund-address>");
+    println!("     it pays from a throwaway key, not one tied to your seed, and prints chain id and sender");
+    println!("  3. write chain id and sender on the recovery sheet (contract {BLOBSTORE_ADDRESS} is prefilled);");
+    println!("     keep several copies, and put a copy of the record (or the sheet) with these locators in the");
+    println!("     storage place of each factor paper too");
     Ok(())
 }
 

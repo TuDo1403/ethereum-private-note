@@ -49,14 +49,35 @@ pub fn unhex(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-// GF(2^8) with the AES polynomial; 0x11b without its top bit is 0x1b.
+/// BlobStore's canonical CREATE2 address: the same on every EVM chain with the standard deployer, so
+/// a recovery sheet can carry it. `publish` pins the same value (its CANONICAL_ADDRESS); kept as a
+/// plain constant here so restoring never depends on the `publish` crate.
+pub const BLOBSTORE_ADDRESS: &str = "0x0356F8a3FD7ef15B775896B63f822307547D8971";
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// First 4 bytes of SHA-256 over the seed entropy, as hex. Lets a person check that a test restore gave
+/// the seed they backed up without showing the seed. 32 bits of a hash leave a 128-bit seed with 96 bits
+/// an attacker must still search, so writing it on the public sheet costs nothing that matters.
+pub fn seed_fingerprint(entropy: &[u8]) -> String {
+    hex(&Sha256::digest(entropy)[..4])
+}
+
+/// First 8 bytes of SHA-256 over the record bytes, as hex: a short name for one record, printed by
+/// `vault` on the recovery sheet and by `publish` after storing it.
+pub fn record_id(record: &[u8]) -> String {
+    hex(&Sha256::digest(record)[..8])
+}
+
+// GF(2^8) with the AES polynomial; 0x11b without its top bit is 0x1b. `a` is often a secret byte, so
+// there are no data-dependent branches or loop counts: masks (0x00 or 0xff) replace the `if`s.
 fn gmul(mut a: u8, mut b: u8) -> u8 {
     let mut p = 0;
-    while b != 0 {
-        if b & 1 != 0 {
-            p ^= a;
-        }
-        a = (a << 1) ^ if a & 0x80 != 0 { 0x1b } else { 0 };
+    for _ in 0..8 {
+        p ^= a & (b & 1).wrapping_neg();
+        a = (a << 1) ^ (0x1b & (a >> 7).wrapping_neg());
         b >>= 1;
     }
     p
@@ -79,8 +100,9 @@ pub fn words_to_entropy(words: &str) -> Result<Vec<u8>, String> {
         return Err("mnemonic must be 12, 15, 18, 21 or 24 words".into());
     }
     let mut bits = Vec::new();
-    for w in &words {
-        let i = list.iter().position(|x| x == w).ok_or(format!("not a BIP39 word: \"{w}\""))?;
+    for (n, w) in words.iter().enumerate() {
+        // Position only, never the text: a mistyped seed or share word is still mostly a secret.
+        let i = list.iter().position(|x| x == w).ok_or(format!("word {} is not a BIP39 word", n + 1))?;
         bits.extend((0..11).rev().map(|k| (i >> k) & 1 == 1));
     }
     let entropy_bits = bits.len() - words.len() / 3;
@@ -198,6 +220,15 @@ pub struct Factors {
 
 const NAMES: [&str; 3] = ["A", "B", "C"];
 
+/// The 33-byte plaintext of both formats: entropy length, entropy, then zero padding. The padding is
+/// checked too, so there is exactly one valid plaintext per seed and nothing can hide in the spare bytes.
+pub(crate) fn check_plaintext(plain: &[u8]) -> Result<(), String> {
+    let ok = plain.len() == 33
+        && [16, 20, 24, 28, 32].contains(&(plain[0] as usize))
+        && plain[1 + plain[0] as usize..].iter().all(|&b| b == 0);
+    if ok { Ok(()) } else { Err("malformed plaintext".into()) }
+}
+
 /// Tries every pair of the factors given, so one wrong factor does not matter as long as the other two
 /// are right. Returns the entropy and which pair worked.
 pub fn unseal(record: &[u8], f: &Factors) -> Result<(Vec<u8>, String), String> {
@@ -231,9 +262,7 @@ pub fn unseal(record: &[u8], f: &Factors) -> Result<(Vec<u8>, String), String> {
                 .expect("32-byte key")
                 .decrypt(Nonce::from_slice(&record[86..98]), Payload { msg: &record[98..], aad: header });
             if let Ok(plain) = opened {
-                if plain.len() != 33 || ![16, 20, 24, 28, 32].contains(&(plain[0] as usize)) {
-                    return Err("malformed plaintext".into());
-                }
+                check_plaintext(&plain)?;
                 let used = format!("{}+{}", NAMES[x1 as usize - 1], NAMES[x2 as usize - 1]);
                 return Ok((plain[1..1 + plain[0] as usize].to_vec(), used));
             }
@@ -263,6 +292,24 @@ pub fn share_c_from_words(words: &str) -> Result<[u8; 32], String> {
     words_to_entropy(words)?.try_into().map_err(|_| "share C must be 24 words".to_string())
 }
 
+/// All the cheap checks of a v1 `restore`, so nothing slow (the YubiKey's PIN and touch, Argon2) starts
+/// until the factors are known to be usable: the record is v1, share C (if given) decodes, at least two
+/// factors are given, and the Argon2 cost is in range when the passphrase will be stretched. Returns
+/// share C decoded. Errors never contain the words given.
+pub fn check_factors(record: &[u8], passphrase: bool, passkey: bool, share_c: Option<&str>) -> Result<Option<[u8; 32]>, String> {
+    if record.len() != RECORD || record[0] != 1 {
+        return Err(format!("not a v1 record (expected {RECORD} bytes)"));
+    }
+    let c = share_c.map(|w| share_c_from_words(w).map_err(|e| format!("share C: {e}"))).transpose()?;
+    if [passphrase, passkey, c.is_some()].iter().filter(|&&b| b).count() < 2 {
+        return Err("need two of: passphrase, passkey, share C".into());
+    }
+    if passphrase {
+        check_argon_cost(u32::from_be_bytes(record[1..5].try_into().unwrap()), record[5])?;
+    }
+    Ok(c)
+}
+
 /// Restore from any two of: passphrase, the passkey's 32-byte secret, share C words. Returns the seed
 /// words and which pair opened the record.
 pub fn restore(
@@ -272,15 +319,98 @@ pub fn restore(
     share_c: Option<&str>,
 ) -> Result<(String, String), String> {
     // Checked first: derive_pad_a reads the header and costs seconds of Argon2.
-    if record.len() != RECORD || record[0] != 1 {
-        return Err(format!("not a v1 record (expected {RECORD} bytes)"));
-    }
+    let c = check_factors(record, passphrase.is_some(), prf.is_some(), share_c)?;
     let header = &record[..HEADER];
     let f = Factors {
         a: passphrase.map(|p| derive_pad_a(p, header).map(|(_, pad)| pad)).transpose()?,
         b: prf.map(|p| derive_pad_b(p, header)).transpose()?,
-        c: share_c.map(share_c_from_words).transpose()?,
+        c,
     };
     let (entropy, used) = unseal(record, &f)?;
     Ok((entropy_to_words(&entropy), used))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_free_gmul_matches_the_textbook_one() {
+        fn reference(mut a: u8, mut b: u8) -> u8 {
+            let mut p = 0;
+            while b != 0 {
+                if b & 1 != 0 {
+                    p ^= a;
+                }
+                a = (a << 1) ^ if a & 0x80 != 0 { 0x1b } else { 0 };
+                b >>= 1;
+            }
+            p
+        }
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                assert_eq!(gmul(a, b), reference(a, b), "{a} * {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn word_errors_name_the_position_never_the_text() {
+        let typo = "legal winner thank year hunter2 sausage worth useful legal winner thank yellow";
+        let e = words_to_entropy(typo).unwrap_err();
+        assert_eq!(e, "word 5 is not a BIP39 word");
+        let e = share_c_from_words(&format!("{} hunter2", ["abandon"; 23].join(" "))).unwrap_err();
+        assert!(e.contains("word 24") && !e.contains("hunter2"), "{e}");
+    }
+
+    #[test]
+    fn fingerprint_and_record_id() {
+        // A checksum-valid typo ("wave" -> "wage") gives another seed; the fingerprint shows it.
+        let seed = words_to_entropy("legal winner thank year wave sausage worth useful legal winner thank yellow").unwrap();
+        let typo = words_to_entropy("legal winner thank year wage sausage worth useful legal winner thank yellow").unwrap();
+        assert_eq!(seed_fingerprint(&seed), "87dcde7f");
+        assert_eq!(seed_fingerprint(&typo), "8b4cedd3");
+        assert_eq!(record_id(b""), "e3b0c44298fc1c14"); // SHA-256("") starts e3b0c442 98fc1c14
+    }
+
+    #[test]
+    fn nonzero_plaintext_padding_is_refused() {
+        let header = new_header(1024, 1, &[0; 16]);
+        let (pa, pb) = ([1u8; 32], [2u8; 32]);
+        let rnd: Vec<u8> = (0..76u8).collect(); // key(32) line(32) nonce(12)
+        let mut off = 0;
+        let mut take = |n: usize| {
+            off += n;
+            rnd[off - n..off].to_vec()
+        };
+        let (mut record, c) = seal(&header, &pa, &pb, &[7; 16], &mut take).unwrap();
+        let f = Factors { a: Some(pa), b: None, c: Some(c) };
+        assert_eq!(unseal(&record, &f).unwrap().0, vec![7; 16]);
+        // Same key and nonce, one padding byte set: authenticates, but must still be refused.
+        let mut plain = [0u8; 33];
+        plain[0] = 16;
+        plain[1..17].fill(7);
+        plain[32] = 1;
+        let ct = Aes256Gcm::new_from_slice(&rnd[..32])
+            .unwrap()
+            .encrypt(Nonce::from_slice(&record[86..98]), Payload { msg: &plain, aad: &header })
+            .unwrap();
+        record[98..].copy_from_slice(&ct);
+        assert_eq!(unseal(&record, &f).unwrap_err(), "malformed plaintext");
+    }
+
+    #[test]
+    fn cheap_checks_come_before_argon2() {
+        // m above the cap: had Argon2 run first, the error would be "refusing ...".
+        let mut record = vec![0u8; RECORD];
+        record[..HEADER].copy_from_slice(&new_header(u32::MAX, 3, &[0; 16]));
+        let bad_c = format!("{} zebra", ["abandon"; 23].join(" ")); // valid words, wrong checksum
+        let e = restore(&record, Some("pass"), None, Some(&bad_c)).unwrap_err();
+        assert!(e.starts_with("share C:"), "{e}");
+        assert!(restore(&record, Some("pass"), None, None).unwrap_err().contains("need two"));
+        assert!(check_factors(&record, true, true, None).unwrap_err().contains("refusing"));
+        // Without the passphrase the Argon2 cost does not matter.
+        let good_c = format!("{} art", ["abandon"; 23].join(" "));
+        assert_eq!(check_factors(&record, false, true, Some(&good_c)).unwrap(), Some([0; 32]));
+    }
 }

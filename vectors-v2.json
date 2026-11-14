@@ -245,5 +245,178 @@
         "x": 4
       }
     ]
+  },
+  {
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "entropy": "0123456789abcdef0123456789abcdef",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203030201",
+    "k": 2,
+    "mnemonic": "abuse boss fly battle rubber wasp afraid hamster guide essence vibrant tattoo",
+    "name": "fast-2-of-3-paper-first-passphrase-last",
+    "passphrase": "correct horse battery staple",
+    "random": "0f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203030201d0177ab49bab3ff1fb2acb91fc551af20038e29e282affabfc1b231406d78da2f9535116bf4c7adbd812cd5856d1a09755b2cfcadff3d60f9d5713d55e34d2adcfd6dde4ebf2f900070e151c63899dcff6b78f49bc5cb6bbd9fd4132ac98a1391b4d93f2744d4d1fb247c386fb93f4e20b0c9a4da2040c84190758095a",
+    "shares": [
+      {
+        "kind": "paper",
+        "share": "e0e0e02020202060606060602020202020e0e0e0e02020202020606060602020",
+        "words": "thought alpha amount doctor acoustic coral light army gasp absurd amount doctor asthma idea logic advice cage absurd amount school alcohol copy letter bring",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "1af68698a6bd34f1f238f4b519abc93ac172b5e245975f207e82b79ba862f5c1",
+        "secret": "a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1",
+        "x": 2
+      },
+      {
+        "kind": "passphrase",
+        "pad": "dc44503e894868fbf62ec740f0652207cb9ef5c2c9ccff14885022f6433b6b06",
+        "x": 3
+      }
+    ]
+  },
+  {
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "entropy": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafb",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf030402030103",
+    "k": 3,
+    "mnemonic": "thought audit rib six fury initial photo diary typical guess knife that audit west sound pact want save dinosaur vote review",
+    "name": "fast-3-of-4-paper-between-on-chain-28-bytes",
+    "passphrase": "correct horse battery staple",
+    "random": "11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0304020301039e986cc3d9f0e1266d6c88aadbf272d2855224221bb509c70dd2af2ba2b46c765aecbf73fcd603f04055613b76df4d12e7d9ba802ca501db4bbf4244957e9934b1b8bfc6cdd4dbe2e9f0f7fe09a33672a6bde03a4463366426a1ffb548bd0c6295996299755cf56496dd3f95d77d20fb145f35555a56ca1bc76c825d7b",
+    "shares": [
+      {
+        "kind": "hardware",
+        "pad": "afa0530514243a44041cffd4defe61c824fa8b94a6f14295543248c55748effc",
+        "secret": "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0",
+        "x": 1
+      },
+      {
+        "kind": "paper",
+        "share": "81beab9faee1cc0e3f70655a7b4419265c637639083c115e6fadb887c6f9c4fb",
+        "words": "like vocal tree fruit broom alpha worry arrow foil surface alien erosion shiver roast tomorrow always bacon vibrant twin illegal ladder language become leaf",
+        "x": 2
+      },
+      {
+        "kind": "passphrase",
+        "pad": "fb72340cb2d72fde5f0524416dfb34549b9aec990479f065c432dae373a73daf",
+        "x": 3
+      },
+      {
+        "kind": "paper",
+        "share": "47fa91dc4bbd7eea7d8be05d0cb1398462dfb442d5985bad3aaec578a4191ca1",
+        "words": "elevator stand jacket number subject inside wage lab fringe grain example angle combine surface area reason forum hawk produce memory medal arrive income crash",
+        "x": 4
+      }
+    ]
+  },
+  {
+    "argon2id_out": null,
+    "entropy": "fedcba9876543210fedcba9876543210",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203020202",
+    "k": 2,
+    "mnemonic": "yard total plastic uncover drip anchor window nuclear observe razor arrive camera",
+    "name": "fast-2-of-3-hardware-only",
+    "passphrase": "",
+    "random": "131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203020202b5c050d65e39b3a4204cf8356c56902c37952dea3605b4e1f1e65ed93acda16d5322d7a20563aac6e407e3135477c2f5baf43f62707c3061eb2b03592c30719ac3afb35a8340ffbbab12983f7cff9a0efe70f50c6d8651c0012781d2b7bdb65dd3dae1e8eff6fd040b121920d791331328b75dd6ada68a3387778cb9d95ad7987f6d6d266fbfb924507ad9e15e9e33581b8799ba8a5847b167394b2f9a",
+    "shares": [
+      {
+        "kind": "hardware",
+        "pad": "552070f67e1993c4402c98154c76b00cd775cd0ad62594c1d1863eb95aad814d",
+        "secret": "c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "bdd7f49a3479adcaf931c8f3bd851d31ffaa4c0a11cd9ce67db683f28e8905f5",
+        "secret": "c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1",
+        "x": 2
+      },
+      {
+        "kind": "hardware",
+        "pad": "dea0916abd4ce5939d168a9fd2431096d844f71c73b170d30c18a8c9a2ba07fe",
+        "secret": "c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2",
+        "x": 3
+      }
+    ]
+  },
+  {
+    "error": "at most one passphrase share",
+    "factors": [
+      {
+        "value": "1926efd9a8dcc0e6171d30675080c49a08caaf2410e6dbb934c1f7c71f372f63",
+        "x": 1
+      },
+      {
+        "value": "b3c152c1a049d8aadb4d4cbaca2afd7c83bc9802e034d503675766a723ea17a3",
+        "x": 2
+      },
+      {
+        "value": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+        "x": 3
+      }
+    ],
+    "name": "invalid-two-passphrase-shares",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010103f9c60f3948fce0c6377d500730e0e4ba28ea4fc4f0063b9914e1d7a77f574f036d04ba325a63efb6d64b578af30812885672db5ab14eb2b4c1daf63cb163b31cc3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc9f4a26e59d1729a63cf15278e4872f32"
+  },
+  {
+    "error": "refusing",
+    "factors": [
+      {
+        "value": "1926efd9a8dcc0e6171d30675080c49a08caaf2410e6dbb934c1f7c71f372f63",
+        "x": 1
+      },
+      {
+        "value": "b3c152c1a049d8aadb4d4cbaca2afd7c83bc9802e034d503675766a723ea17a3",
+        "x": 2
+      },
+      {
+        "value": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+        "x": 3
+      }
+    ],
+    "name": "invalid-argon2-m-above-cap",
+    "record": "020020000101a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203f9c60f3948fce0c6377d500730e0e4ba28ea4fc4f0063b9914e1d7a77f574f036d04ba325a63efb6d64b578af30812885672db5ab14eb2b4c1daf63cb163b31cc3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc9f4a26e59d1729a63cf15278e4872f32"
+  },
+  {
+    "error": "expected 152 bytes",
+    "factors": [
+      {
+        "value": "1926efd9a8dcc0e6171d30675080c49a08caaf2410e6dbb934c1f7c71f372f63",
+        "x": 1
+      },
+      {
+        "value": "b3c152c1a049d8aadb4d4cbaca2afd7c83bc9802e034d503675766a723ea17a3",
+        "x": 2
+      },
+      {
+        "value": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+        "x": 3
+      }
+    ],
+    "name": "invalid-length-one-byte-extra",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203f9c60f3948fce0c6377d500730e0e4ba28ea4fc4f0063b9914e1d7a77f574f036d04ba325a63efb6d64b578af30812885672db5ab14eb2b4c1daf63cb163b31cc3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc9f4a26e59d1729a63cf15278e4872f3200"
+  },
+  {
+    "error": "malformed plaintext",
+    "factors": [
+      {
+        "value": "1926efd9a8dcc0e6171d30675080c49a08caaf2410e6dbb934c1f7c71f372f63",
+        "x": 1
+      },
+      {
+        "value": "b3c152c1a049d8aadb4d4cbaca2afd7c83bc9802e034d503675766a723ea17a3",
+        "x": 2
+      },
+      {
+        "value": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+        "x": 3
+      }
+    ],
+    "name": "invalid-nonzero-plaintext-padding",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203f9c60f3948fce0c6377d500730e0e4ba28ea4fc4f0063b9914e1d7a77f574f036d04ba325a63efb6d64b578af30812885672db5ab14eb2b4c1daf63cb163b31cc3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbdf52ddd07dcc6eded7769ab52d47e1cee"
   }
 ]

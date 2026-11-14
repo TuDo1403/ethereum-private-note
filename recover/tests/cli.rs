@@ -3,8 +3,13 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 fn cli(args: &[&str], stdin: &str) -> Output {
+    cli_path(args, stdin, &std::env::var("PATH").unwrap_or_default())
+}
+
+fn cli_path(args: &[&str], stdin: &str, path: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_recover"))
         .args(args)
+        .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -132,4 +137,88 @@ fn restore_v2_never_repeats_stdin_and_checks_before_slow_work() {
     let out = cli(&["restore", rec, "--cred-id", "Zm9v"], &good);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--key"));
+}
+
+fn base64(b: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    b.chunks(3)
+        .flat_map(|c| {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            (0..4).map(move |i| if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' })
+        })
+        .collect()
+}
+
+/// A directory holding a fake `fido2-assert` that runs `body` (sh), put first on PATH. It stands in for
+/// the YubiKey, which tests cannot touch. Returns (dir, PATH value).
+fn fake_fido(name: &str, body: &str) -> (std::path::PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("epn-recover-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("fido2-assert");
+    std::fs::write(&tool, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+    (dir, path)
+}
+
+#[test]
+fn v1_strips_crlf_and_never_shows_unsafe_usage() {
+    let vectors: Vec<Value> = serde_json::from_str(include_str!("../../vectors.json")).unwrap();
+    let f = |k: &str| vectors[0][k].as_str().unwrap();
+    let out = cli(&["restore", f("record")], &format!("{}\r\n{}\r\n", f("share_c_words"), f("passphrase")));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), f("mnemonic"));
+    // The usage shows secrets read at hidden prompts, never typed into a command line.
+    let usage = String::from_utf8_lossy(&cli(&[], "").stderr).to_string();
+    assert!(usage.contains("read -rs") && usage.contains("vault restore") && !usage.contains("$SHARE_C_WORDS"), "{usage}");
+}
+
+#[test]
+fn v1_checks_share_c_before_the_yubikey_and_echoes_no_word() {
+    let vectors: Vec<Value> = serde_json::from_str(include_str!("../../vectors.json")).unwrap();
+    let f = |k: &str| vectors[0][k].as_str().unwrap();
+    let (dir, path) = fake_fido("order", "touch \"$(dirname \"$0\")/asked\"; exit 1");
+    let typo = f("share_c_words").replacen(' ', " hunter2 ", 1); // 25 words, one not in the list
+    let mut words: Vec<&str> = f("share_c_words").split(' ').collect();
+    words[4] = "hunter2";
+    for share_c in [typo, words.join(" ")] {
+        let out = cli_path(&["restore", f("record"), "--cred-id", "Zm9v", "--device", "/dev/null"], &format!("{share_c}\n\n"), &path);
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(err.contains("share C") && !err.contains("hunter2") && !err.contains("PIN"), "{err}");
+        assert!(!dir.join("asked").exists(), "the YubiKey was asked before share C was checked");
+    }
+    let out = cli_path(&["restore", f("record"), "--device", "/dev/null"], &format!("{}\n\n", words.join(" ")), &path);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("word 5 is not a BIP39 word"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn v1_yubikey_output_is_parsed_strictly() {
+    let vectors: Vec<Value> = serde_json::from_str(include_str!("../../vectors.json")).unwrap();
+    let f = |k: &str| vectors[0][k].as_str().unwrap();
+    let prf: Vec<u8> = (0..32).map(|i| u8::from_str_radix(&f("prf")[2 * i..2 * i + 2], 16).unwrap()).collect();
+    let args = ["restore", f("record"), "--cred-id", "Zm9v", "--device", "/dev/null"];
+    let stdin = format!("{}\n\n", f("share_c_words"));
+    // Echoes the client data hash and rp id it was sent, as libfido2 does, then auth data, signature, secret.
+    let fake = |secret: &str| format!("read h; read rp; read id; read salt; printf '%s\\n' \"$h\" \"$rp\" AQID AQID {secret}");
+    let (dir, path) = fake_fido("good", &fake(&base64(&prf)));
+    let out = cli_path(&args, &stdin, &path);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), f("mnemonic"));
+    std::fs::remove_dir_all(dir).unwrap();
+    // The audit case: only the client data hash (32 zero bytes) printed. It must not become factor B.
+    for (name, body) in [
+        ("one-line", "read h; echo \"$h\"".to_string()),
+        ("zero-secret", fake(&base64(&[0; 32]))),
+        ("short-secret", fake(&base64(&prf[..31]))),
+    ] {
+        let (dir, path) = fake_fido(name, &body);
+        let out = cli_path(&args, &stdin, &path);
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(1), "{name}: {err}");
+        assert!(err.contains("fido2-assert"), "{name}: {err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
