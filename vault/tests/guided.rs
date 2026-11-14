@@ -128,7 +128,12 @@ fn tool(dir: &std::path::Path, name: &str, body: &str) {
 }
 
 /// Runs an expect script in a fresh work folder with fake tools on PATH; returns the folder and stdout.
-fn run_script(name: &str, script: &str, tools: &[(&str, &str)], env: &[(&str, &str)]) -> Option<(std::path::PathBuf, String)> {
+fn run_script(
+    name: &str,
+    script: &str,
+    tools: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> Option<(std::path::PathBuf, String)> {
     if Command::new("expect").arg("-v").output().is_err() {
         eprintln!("skipped: `expect` is not installed");
         return None;
@@ -145,7 +150,14 @@ fn run_script(name: &str, script: &str, tools: &[(&str, &str)], env: &[(&str, &s
     let mut cmd = Command::new("expect");
     cmd.arg(&path)
         .current_dir(&work)
-        .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .env("VAULT", env!("CARGO_BIN_EXE_vault"))
         .env("WORK", &work);
     for (k, v) in env {
@@ -153,7 +165,11 @@ fn run_script(name: &str, script: &str, tools: &[(&str, &str)], env: &[(&str, &s
     }
     let out = cmd.output().unwrap();
     let transcript = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "{transcript}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{transcript}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Some((work, transcript))
 }
 
@@ -162,13 +178,30 @@ fn backup_then_verify_only_restore() {
     // Both echo the client data hash and rp id they were sent, as libfido2 does (see core/src/fido.rs).
     let cred = "read h; read rp; read user; read uid; printf '%s\\n' \"$h\" \"$rp\" packed AQID Zm9vYmFy AQID AQID";
     let secret = format!("{}AQE=", "AQEB".repeat(10)); // 32 bytes of 0x01
-    let assert = format!("read h; read rp; read id; read salt; printf '%s\\n' \"$h\" \"$rp\" AQID AQID {secret}");
+    let assert = format!(
+        "read h; read rp; read id; read salt; printf '%s\\n' \"$h\" \"$rp\" AQID AQID {secret}"
+    );
     let tools = [("fido2-cred", cred), ("fido2-assert", assert.as_str())];
-    let Some((work, transcript)) = run_script("guided", SCRIPT, &tools, &[("SEED", SEED), ("TYPO", TYPO)]) else { return };
+    let Some((work, transcript)) =
+        run_script("guided", SCRIPT, &tools, &[("SEED", SEED), ("TYPO", TYPO)])
+    else {
+        return;
+    };
 
     let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(SEED).unwrap());
-    let dir = work.join(transcript.rsplit_once("DIR=").unwrap().1.split_whitespace().next().unwrap());
-    assert!(transcript.contains(&format!("FP={fp}")), "fingerprint shown is not the seed's");
+    let dir = work.join(
+        transcript
+            .rsplit_once("DIR=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap(),
+    );
+    assert!(
+        transcript.contains(&format!("FP={fp}")),
+        "fingerprint shown is not the seed's"
+    );
     // The seed is never on screen (it is typed hidden), in backup or in verify-only restore.
     assert!(!transcript.contains("sausage"), "seed shown");
     // No restore command that puts secrets on a command line; the test step points to verify only.
@@ -179,7 +212,10 @@ fn backup_then_verify_only_restore() {
     let record = epn_core::unhex(&record_hex).unwrap();
     // The 2-of-3 layout (passphrase, YubiKey, paper): format version 2, 152 bytes.
     let h = epn_core::record::parse_record(&record).unwrap();
-    assert_eq!((record[0], h.k, h.kinds.len(), record.len()), (2, 2, 3, 152));
+    assert_eq!(
+        (record[0], h.k, h.kinds.len(), record.len()),
+        (2, 2, 3, 152)
+    );
     let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();
     for want in [
         "cast code <address>".to_string(),
@@ -212,33 +248,85 @@ esac"#;
 
 #[test]
 fn backup_with_1password_then_verify_only_restore() {
-    let Some((work, transcript)) = run_script("1password", SCRIPT_1PASSWORD, &[("op", FAKE_OP)], &[("SEED", SEED)]) else { return };
+    let Some((work, transcript)) = run_script(
+        "1password",
+        SCRIPT_1PASSWORD,
+        &[("op", FAKE_OP)],
+        &[("SEED", SEED)],
+    ) else {
+        return;
+    };
     let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(SEED).unwrap());
-    assert!(transcript.contains(&format!("FP={fp}")), "fingerprint shown is not the seed's");
+    assert!(
+        transcript.contains(&format!("FP={fp}")),
+        "fingerprint shown is not the seed's"
+    );
     assert!(!transcript.contains("sausage"), "seed shown");
 
-    let dir = work.join(transcript.rsplit_once("DIR=").unwrap().1.split_whitespace().next().unwrap());
-    let record = epn_core::unhex(&std::fs::read_to_string(dir.join("record.hex")).unwrap()).unwrap();
+    let dir = work.join(
+        transcript
+            .rsplit_once("DIR=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap(),
+    );
+    let record =
+        epn_core::unhex(&std::fs::read_to_string(dir.join("record.hex")).unwrap()).unwrap();
     // Passphrase on chain, shares 2 (1Password) and 3 (paper) off chain: one masked share, 120 bytes.
     let h = epn_core::record::parse_record(&record).unwrap();
     use epn_core::record::Kind::*;
-    assert_eq!((h.k, h.kinds.clone(), record.len()), (2, vec![Passphrase, Paper, Paper], 120));
+    assert_eq!(
+        (h.k, h.kinds.clone(), record.len()),
+        (2, vec![Passphrase, Paper, Paper], 120)
+    );
 
     let title = format!("epn-share-2-{}", epn_core::record_id(&record));
     let reference = format!("op://Personal/{title}/password");
     let stored = std::fs::read_to_string(work.join(format!("op-{title}"))).unwrap();
-    assert!(epn_core::bip39::share_from_words(&stored).is_ok(), "1Password holds a valid share: {stored:?}");
+    assert!(
+        epn_core::bip39::share_from_words(&stored).is_ok(),
+        "1Password holds a valid share: {stored:?}"
+    );
     let argv = std::fs::read_to_string(work.join("op-argv.log")).unwrap();
     // The share's first three words never appear in op's arguments (they went through stdin).
     let start: Vec<&str> = stored.split(' ').take(3).collect();
-    assert!(!argv.contains(&start.join(" ")), "a share went through op's argv:\n{argv}");
+    assert!(
+        !argv.contains(&start.join(" ")),
+        "a share went through op's argv:\n{argv}"
+    );
     // Every op call names the account: with a work account also signed in, op must never pick one itself.
-    assert!(argv.lines().count() >= 3 && argv.lines().all(|l| l.contains("--account my.1password.com ")), "{argv}");
-    assert!(argv.contains("item create --account my.1password.com --vault Personal -"), "{argv}");
-    assert!(argv.contains(&format!("read --account my.1password.com --no-newline {reference}")), "{argv}");
+    assert!(
+        argv.lines().count() >= 3
+            && argv
+                .lines()
+                .all(|l| l.contains("--account my.1password.com ")),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("item create --account my.1password.com --vault Personal -"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains(&format!(
+            "read --account my.1password.com --no-newline {reference}"
+        )),
+        "{argv}"
+    );
 
     let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();
-    assert!(sheet.contains(&format!("1password:        share 2 {reference} account my.1password.com")), "{sheet}");
-    assert!(sheet.contains("1Password item (Touch ID)") && !sheet.contains("credential:") && !sheet.contains("--key"), "{sheet}");
+    assert!(
+        sheet.contains(&format!(
+            "1password:        share 2 {reference} account my.1password.com"
+        )),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains("1Password item (Touch ID)")
+            && !sheet.contains("credential:")
+            && !sheet.contains("--key"),
+        "{sheet}"
+    );
     std::fs::remove_dir_all(&work).unwrap();
 }

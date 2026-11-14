@@ -38,11 +38,17 @@ fn run() -> Result<(), String> {
         Some(b) => b,
         None => {
             clear();
-            println!("What do you want to do?\n  1. make a new backup of a seed\n  2. restore a seed from a backup\n");
+            println!(
+                "What do you want to do?\n  1. make a new backup of a seed\n  2. restore a seed from a backup\n"
+            );
             choose_1_or_2()? == 1
         }
     };
-    if backup { backup::backup(device) } else { restore::restore_flow(device) }
+    if backup {
+        backup::backup(device)
+    } else {
+        restore::restore_flow(device)
+    }
 }
 
 fn main() {

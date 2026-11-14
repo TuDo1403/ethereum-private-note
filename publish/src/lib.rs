@@ -48,9 +48,16 @@ const SWEEP_WAIT: Duration = Duration::from_secs(90);
 
 /// Parse an address: `0x` required; mixed-case input must have a valid EIP-55 checksum.
 pub fn parse_address(text: &str) -> Result<Address, String> {
-    let body = text.strip_prefix("0x").ok_or("address must start with 0x")?;
-    let mixed = body.chars().any(|c| c.is_ascii_lowercase()) && body.chars().any(|c| c.is_ascii_uppercase());
-    let parsed = if mixed { Address::parse_checksummed(text, None).map_err(|e| e.to_string()) } else { text.parse::<Address>().map_err(|e| e.to_string()) };
+    let body = text
+        .strip_prefix("0x")
+        .ok_or("address must start with 0x")?;
+    let mixed = body.chars().any(|c| c.is_ascii_lowercase())
+        && body.chars().any(|c| c.is_ascii_uppercase());
+    let parsed = if mixed {
+        Address::parse_checksummed(text, None).map_err(|e| e.to_string())
+    } else {
+        text.parse::<Address>().map_err(|e| e.to_string())
+    };
     parsed.map_err(|e| format!("bad address: {e}"))
 }
 
@@ -59,7 +66,10 @@ pub fn parse_address(text: &str) -> Result<Address, String> {
 /// be useless forever. A record is at most 250 bytes (24 fixed header + 5 kinds + 5 x 32 masked shares + 12 nonce + 49 ciphertext), so its code (251 bytes with the 0x00
 /// prefix) is far below the EIP-170 limit of 24576 bytes.
 pub fn parse_record(text: &str) -> Result<Vec<u8>, String> {
-    let body = text.trim().strip_prefix("0x").ok_or("record must start with 0x")?;
+    let body = text
+        .trim()
+        .strip_prefix("0x")
+        .ok_or("record must start with 0x")?;
     let bytes = alloy::hex::decode(body).map_err(|e| format!("record is not hex: {e}"))?;
     check_record(&bytes)?;
     Ok(bytes)
@@ -77,7 +87,13 @@ pub fn amount(wei: U256) -> String {
 /// it about 1 in 256 random records would fail to deploy.
 fn deploy_code(record: &[u8]) -> Vec<u8> {
     let len = u16::try_from(record.len() + 1).expect("a valid record is at most 250 bytes");
-    [&[0x61][..], &len.to_be_bytes(), &[0x80, 0x60, 0x0a, 0x3d, 0x39, 0x3d, 0xf3, 0x00], record].concat()
+    [
+        &[0x61][..],
+        &len.to_be_bytes(),
+        &[0x80, 0x60, 0x0a, 0x3d, 0x39, 0x3d, 0xf3, 0x00],
+        record,
+    ]
+    .concat()
 }
 
 /// True if `code` is exactly what the deploy of `record` leaves: `0x00 || record`, byte for byte.
@@ -148,7 +164,10 @@ pub struct FundRequest {
 impl FundRequest {
     /// EIP-681 payment URI; `@chain_id` stops a wallet from paying on the wrong network.
     pub fn uri(&self) -> String {
-        format!("ethereum:{}@{}?value={}", self.sender, self.chain_id, self.required_wei)
+        format!(
+            "ethereum:{}@{}?value={}",
+            self.sender, self.chain_id, self.required_wei
+        )
     }
 }
 
@@ -166,7 +185,12 @@ fn secret_forms(urls: &[&str]) -> Vec<String> {
             forms.push(parsed.to_string());
         }
     }
-    forms.extend(forms.clone().iter().map(|f| f.trim_end_matches('/').to_string()));
+    forms.extend(
+        forms
+            .clone()
+            .iter()
+            .map(|f| f.trim_end_matches('/').to_string()),
+    );
     forms.retain(|f| !f.is_empty());
     // Longest first, so replacing a shorter form cannot leave the tail of a longer one behind.
     forms.sort_by_key(|f| std::cmp::Reverse(f.len()));
@@ -194,39 +218,77 @@ impl Drop for Rescue {
     fn drop(&mut self) {
         if self.armed.get() {
             let (addr, id) = (self.signer.address(), self.chain_id);
-            log!("\n!!! This process is exiting and ETH may be at, or still on its way to, {addr} on chain {id}.");
-            log!("!!! Below is that throwaway address's private key: the ONLY way to recover that ETH. It holds only");
-            log!("!!! this run's gas money, but anyone who sees it can take that money: import it into a wallet now");
-            log!("!!! (or `cast send <your address> --value <balance minus fee> --private-key <key> --rpc-url <RPC>`).");
-            log!("!!! THROWAWAY PRIVATE KEY: 0x{}", alloy::hex::encode(self.signer.to_bytes()));
+            log!(
+                "\n!!! This process is exiting and ETH may be at, or still on its way to, {addr} on chain {id}."
+            );
+            log!(
+                "!!! Below is that throwaway address's private key: the ONLY way to recover that ETH. It holds only"
+            );
+            log!(
+                "!!! this run's gas money, but anyone who sees it can take that money: import it into a wallet now"
+            );
+            log!(
+                "!!! (or `cast send <your address> --value <balance minus fee> --private-key <key> --rpc-url <RPC>`)."
+            );
+            log!(
+                "!!! THROWAWAY PRIVATE KEY: 0x{}",
+                alloy::hex::encode(self.signer.to_bytes())
+            );
         }
     }
 }
 
 /// Run the whole flow. `on_fund` is called before polling and again if the price moves.
-pub async fn publish(opts: &Options<'_>, record: &[u8], mut on_fund: impl FnMut(&FundRequest)) -> Result<Outcome, String> {
+pub async fn publish(
+    opts: &Options<'_>,
+    record: &[u8],
+    mut on_fund: impl FnMut(&FundRequest),
+) -> Result<Outcome, String> {
     let secrets = secret_forms(&[opts.rpc_url, opts.verify_rpc_url.unwrap_or("")]);
-    run(opts, record, &mut on_fund, &secrets).await.map_err(|m| scrub(m, &secrets))
+    run(opts, record, &mut on_fund, &secrets)
+        .await
+        .map_err(|m| scrub(m, &secrets))
 }
 
-async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundRequest), secrets: &[String]) -> Result<Outcome, String> {
+async fn run(
+    opts: &Options<'_>,
+    record: &[u8],
+    on_fund: &mut dyn FnMut(&FundRequest),
+    secrets: &[String],
+) -> Result<Outcome, String> {
     check_record(record)?;
     let id = record_id(record);
-    log!("record v{}, {} bytes, record id {id}", record[0], record.len());
+    log!(
+        "record v{}, {} bytes, record id {id}",
+        record[0],
+        record.len()
+    );
 
     // The signer (and every clone the provider holds) is dropped when this function returns; k256's
     // SigningKey zeroizes itself on drop. The key is printed only by `Rescue`, never stored.
     let signer = PrivateKeySigner::random();
     let sender = signer.address();
     let rescue_signer = signer.clone();
-    let provider = ProviderBuilder::new().wallet(signer).connect(opts.rpc_url).await.map_err(e("cannot connect to RPC"))?;
-    let reader = ProviderBuilder::new().connect(opts.verify_rpc_url.unwrap_or(opts.rpc_url)).await.map_err(e("cannot connect to verify RPC"))?;
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect(opts.rpc_url)
+        .await
+        .map_err(e("cannot connect to RPC"))?;
+    let reader = ProviderBuilder::new()
+        .connect(opts.verify_rpc_url.unwrap_or(opts.rpc_url))
+        .await
+        .map_err(e("cannot connect to verify RPC"))?;
 
     let chain_id = provider.get_chain_id().await.map_err(e("chain id"))?;
     if chain_id == 0 {
         return Err("RPC reported chain id 0".into());
     }
-    if reader.get_chain_id().await.map_err(e("verify RPC chain id"))? != chain_id {
+    if reader
+        .get_chain_id()
+        .await
+        .map_err(e("verify RPC chain id"))?
+        != chain_id
+    {
         return Err("verify RPC is on a different chain".into());
     }
     log!("chain id {chain_id}");
@@ -241,26 +303,47 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
     if [Address::ZERO, sender].contains(&refund) {
         return Err("refund address must be your own plain account, not zero or the sender".into());
     }
-    if !provider.get_code_at(refund).await.map_err(e("get code"))?.is_empty() {
+    if !provider
+        .get_code_at(refund)
+        .await
+        .map_err(e("get code"))?
+        .is_empty()
+    {
         return Err("refund address has code (contract or delegated account); the sweep could fail, use a plain account".into());
     }
 
     // The estimate is made once (an unfunded `from` is fine: no gas price is set on the request).
     let deploy_tx = TransactionRequest::default().with_deploy_code(deploy_code(record));
-    let deploy_gas = provider.estimate_gas(deploy_tx.clone().with_from(sender)).await.map_err(e("deploy gas estimate"))?;
+    let deploy_gas = provider
+        .estimate_gas(deploy_tx.clone().with_from(sender))
+        .await
+        .map_err(e("deploy gas estimate"))?;
     let deploy_gas = deploy_gas.saturating_mul(GAS_MARGIN_PCT) / 100;
     let gas_total = deploy_gas + SWEEP_GAS;
 
-    let rescue = Rescue { signer: rescue_signer, chain_id, armed: Cell::new(false) };
+    let rescue = Rescue {
+        signer: rescue_signer,
+        chain_id,
+        armed: Cell::new(false),
+    };
     // `funded`: the funding wait completed. `sent`: fees of the deploy tx once sent, which the sweep must
     // outbid to replace it if it is still pending. `sheet`: the recovery-sheet block was printed.
-    let (funded, sent, sheet) = (Cell::new(false), Cell::new(None::<(u128, u128)>), Cell::new(false));
+    let (funded, sent, sheet) = (
+        Cell::new(false),
+        Cell::new(None::<(u128, u128)>),
+        Cell::new(false),
+    );
 
     // From the moment funds can arrive, EVERY exit must go through the sweep below.
     let work = async {
         let (first_fee, _) = quote_fees(&provider).await?;
         let mut required = budget(gas_total, first_fee, opts.allow_high_fees)?;
-        let mut req = FundRequest { sender, chain_id, required_wei: required, refund };
+        let mut req = FundRequest {
+            sender,
+            chain_id,
+            required_wei: required,
+            refund,
+        };
         rescue.armed.set(true); // from here on, a payment may be on its way to `sender`
         on_fund(&req);
         let deadline = Instant::now() + opts.fund_timeout;
@@ -284,22 +367,46 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
                     Err(err) if late => return Err(format!("timed out waiting for funds: {err}")),
                     Err(err) => log!("fee quote failed, retrying: {}", scrub(err, secrets)),
                 },
-                Ok(balance) if late => return Err(format!("timed out: {sender} holds {}, needs {}", amount(balance), amount(required))),
+                Ok(balance) if late => {
+                    return Err(format!(
+                        "timed out: {sender} holds {}, needs {}",
+                        amount(balance),
+                        amount(required)
+                    ));
+                }
                 Ok(_) => {}
-                Err(err) if late => return Err(format!("timed out waiting for funds: balance check failed: {err}")),
-                Err(err) => log!("balance check failed, retrying: {}", scrub(err.to_string(), secrets)),
+                Err(err) if late => {
+                    return Err(format!(
+                        "timed out waiting for funds: balance check failed: {err}"
+                    ));
+                }
+                Err(err) => log!(
+                    "balance check failed, retrying: {}",
+                    scrub(err.to_string(), secrets)
+                ),
             }
             tokio::time::sleep(POLL).await;
         };
         funded.set(true);
 
-        let tx = deploy_tx.with_gas_limit(deploy_gas).with_max_fee_per_gas(max_fee).with_max_priority_fee_per_gas(tip).with_nonce(0);
+        let tx = deploy_tx
+            .with_gas_limit(deploy_gas)
+            .with_max_fee_per_gas(max_fee)
+            .with_max_priority_fee_per_gas(tip)
+            .with_nonce(0);
         sent.set(Some((max_fee, tip))); // before sending: a send error may still have reached the pool
-        let hash = *provider.send_transaction(tx).await.map_err(e("send deploy"))?.tx_hash();
+        let hash = *provider
+            .send_transaction(tx)
+            .await
+            .map_err(e("send deploy"))?
+            .tx_hash();
         log!("deploy tx {hash} sent");
         let receipt = confirmed(&provider, hash, "deploy", sender, opts.confirmations).await?;
         if receipt.contract_address != Some(address) {
-            return Err(format!("deploy tx created {:?}, expected {address}", receipt.contract_address));
+            return Err(format!(
+                "deploy tx created {:?}, expected {address}",
+                receipt.contract_address
+            ));
         }
         // Print the sheet now: the record is on chain whatever fails after this point.
         print_sheet(chain_id, address, &id, Some(receipt.transaction_hash));
@@ -330,24 +437,53 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
     // e.g. while the sweep was being prepared (the sweep then moved on to nonce 1). Then the record IS
     // stored and the user needs the sheet. One check on the verify RPC, byte for byte.
     let mut late_note = String::new();
-    if work.is_err() && sent.get().is_some() && !sheet.get() && reader.get_code_at(address).await.is_ok_and(|c| holds_record(&c, record)) {
+    if work.is_err()
+        && sent.get().is_some()
+        && !sheet.get()
+        && reader
+            .get_code_at(address)
+            .await
+            .is_ok_and(|c| holds_record(&c, record))
+    {
         print_sheet(chain_id, address, &id, None);
-        late_note = format!(" The deploy was mined anyway: the record IS stored at {address} (sheet printed above).");
+        late_note = format!(
+            " The deploy was mined anyway: the record IS stored at {address} (sheet printed above)."
+        );
     }
 
     // Exit before the funds arrived, after the address was shown: a payment may still be on its way.
     let dont_send = if !funded.get() && rescue.armed.get() {
-        format!(" Do not send funds to {sender}: this run is over. If you already sent some, the THROWAWAY PRIVATE KEY printed above is the only way to recover them.")
+        format!(
+            " Do not send funds to {sender}: this run is over. If you already sent some, the THROWAWAY PRIVATE KEY printed above is the only way to recover them."
+        )
     } else {
         String::new()
     };
-    let stranded = format!("Any ETH at {sender} is stuck there: the THROWAWAY PRIVATE KEY printed above is the only way to recover it.");
-    let swept_note = |v: U256| if v.is_zero() { " (nothing to sweep)".to_string() } else { format!(" (swept {} back to {refund})", amount(v)) };
+    let stranded = format!(
+        "Any ETH at {sender} is stuck there: the THROWAWAY PRIVATE KEY printed above is the only way to recover it."
+    );
+    let swept_note = |v: U256| {
+        if v.is_zero() {
+            " (nothing to sweep)".to_string()
+        } else {
+            format!(" (swept {} back to {refund})", amount(v))
+        }
+    };
     match (work, swept) {
-        (Ok(()), Ok(swept)) => Ok(Outcome { chain_id, address, sender, record_id: id, swept }),
-        (Ok(()), Err(s)) => Err(format!("record is stored, but the sweep failed: {s}. {stranded}")),
+        (Ok(()), Ok(swept)) => Ok(Outcome {
+            chain_id,
+            address,
+            sender,
+            record_id: id,
+            swept,
+        }),
+        (Ok(()), Err(s)) => Err(format!(
+            "record is stored, but the sweep failed: {s}. {stranded}"
+        )),
         (Err(w), Ok(v)) => Err(format!("{w}{}.{late_note}{dont_send}", swept_note(v))),
-        (Err(w), Err(s)) => Err(format!("{w}; ALSO the sweep failed: {s}. {stranded}{late_note}{dont_send}")),
+        (Err(w), Err(s)) => Err(format!(
+            "{w}; ALSO the sweep failed: {s}. {stranded}{late_note}{dont_send}"
+        )),
     }
 }
 
@@ -355,18 +491,34 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
 fn print_sheet(chain_id: u64, address: Address, id: &str, tx: Option<B256>) {
     let mut out = std::io::stdout().lock();
     let via = tx.map(|t| format!(" (tx {t})")).unwrap_or_default();
-    let _ = writeln!(out, "\nRecord stored{via}. Put these on the recovery sheet:");
+    let _ = writeln!(
+        out,
+        "\nRecord stored{via}. Put these on the recovery sheet:"
+    );
     let _ = writeln!(out, "  chain id:  {chain_id}");
     let _ = writeln!(out, "  address:   {address}");
     let _ = writeln!(out, "  record id: {id}");
-    let _ = writeln!(out, "  read:      cast code {address} --rpc-url <RPC>   (the code is 0x00 followed by the record)");
+    let _ = writeln!(
+        out,
+        "  read:      cast code {address} --rpc-url <RPC>   (the code is 0x00 followed by the record)"
+    );
 }
 
 /// EIP-1559 fees from the latest base fee and the node's suggested tip.
 async fn quote_fees(p: &impl Provider) -> Result<(u128, u128), String> {
-    let block = p.get_block_by_number(BlockNumberOrTag::Latest).await.map_err(e("latest block"))?.ok_or("RPC returned no latest block")?;
-    let base = block.header.base_fee_per_gas.ok_or("latest block has no base fee (legacy non-EIP-1559 chains are unsupported)")?;
-    let tip = p.get_max_priority_fee_per_gas().await.map_err(e("priority fee"))?;
+    let block = p
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await
+        .map_err(e("latest block"))?
+        .ok_or("RPC returned no latest block")?;
+    let base = block
+        .header
+        .base_fee_per_gas
+        .ok_or("latest block has no base fee (legacy non-EIP-1559 chains are unsupported)")?;
+    let tip = p
+        .get_max_priority_fee_per_gas()
+        .await
+        .map_err(e("priority fee"))?;
     let (max_fee, tip) = fees_from(base.into(), tip);
     if max_fee == 0 {
         return Err("RPC returned a zero base fee and tip".into());
@@ -387,7 +539,10 @@ fn fees_from(base: u128, suggested_tip: u128) -> (u128, u128) {
 fn budget(gas_total: u64, max_fee: u128, allow_high: bool) -> Result<U256, String> {
     let total = U256::from(gas_total) * U256::from(max_fee) * U256::from(HEADROOM);
     if !allow_high && (max_fee > MAX_FEE_CAP || total > U256::from(MAX_TOTAL_CAP)) {
-        return Err(format!("quoted max fee {max_fee} wei/gas, total {}: above the sanity cap (allow_high_fees overrides)", amount(total)));
+        return Err(format!(
+            "quoted max fee {max_fee} wei/gas, total {}: above the sanity cap (allow_high_fees overrides)",
+            amount(total)
+        ));
     }
     Ok(total)
 }
@@ -396,15 +551,27 @@ fn budget(gas_total: u64, max_fee: u128, allow_high: bool) -> Result<U256, Strin
 /// confirmations asked for. RPC errors are retried, not fatal: one failed call must not make the run give
 /// up on a deploy that is being mined (the sweep would then try to replace it). The receipt is re-read on
 /// every poll, so a reorg that drops the tx is noticed. Errors name the sender and tx hash.
-async fn confirmed(p: &impl Provider, hash: B256, what: &str, sender: Address, confirmations: u64) -> Result<TransactionReceipt, String> {
+async fn confirmed(
+    p: &impl Provider,
+    hash: B256,
+    what: &str,
+    sender: Address,
+    confirmations: u64,
+) -> Result<TransactionReceipt, String> {
     let confirmations = confirmations.max(1);
-    let deadline = Instant::now() + RECEIPT_TIMEOUT + PER_CONFIRMATION.saturating_mul(u32::try_from(confirmations).unwrap_or(u32::MAX));
+    let deadline = Instant::now()
+        + RECEIPT_TIMEOUT
+        + PER_CONFIRMATION.saturating_mul(u32::try_from(confirmations).unwrap_or(u32::MAX));
     let mut last = "not mined yet".to_string();
     while Instant::now() < deadline {
         match p.get_transaction_receipt(hash).await {
             Ok(Some(r)) if !r.status() => return Err(format!("{what} tx {hash} reverted")),
             Ok(Some(r)) => match (r.block_number, p.get_block_number().await) {
-                (Some(mined), Ok(head)) if head.saturating_add(1) >= mined.saturating_add(confirmations) => return Ok(r),
+                (Some(mined), Ok(head))
+                    if head.saturating_add(1) >= mined.saturating_add(confirmations) =>
+                {
+                    return Ok(r);
+                }
                 (_, Err(err)) => last = err.to_string(),
                 _ => last = "waiting for confirmations".into(),
             },
@@ -413,7 +580,9 @@ async fn confirmed(p: &impl Provider, hash: B256, what: &str, sender: Address, c
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    Err(format!("{what} tx {hash} from {sender} not confirmed in time: {last}"))
+    Err(format!(
+        "{what} tx {hash} from {sender} not confirmed in time: {last}"
+    ))
 }
 
 /// Read the code at `address` and require it to be `0x00 || record`, byte for byte. An empty answer is
@@ -426,18 +595,25 @@ async fn read_back(reader: &impl Provider, address: Address, record: &[u8]) -> R
         }
         match reader.get_code_at(address).await {
             Ok(c) if holds_record(&c, record) => return Ok(()),
-            Ok(c) if !c.is_empty() => return Err("code read back from chain differs from the record sent".into()),
+            Ok(c) if !c.is_empty() => {
+                return Err("code read back from chain differs from the record sent".into());
+            }
             Ok(_) => last = "empty".into(),
             Err(err) => last = err.to_string(),
         }
     }
-    Err(format!("read-back of the code at {address} failed after {READBACK_TRIES} tries: {last}"))
+    Err(format!(
+        "read-back of the code at {address} failed after {READBACK_TRIES} tries: {last}"
+    ))
 }
 
 /// Both fee fields raised by 12.5 %, rounded up: a replacement must outbid the pending tx on both
 /// (geth and most pools require +10 %).
 fn bump((max_fee, tip): (u128, u128)) -> (u128, u128) {
-    (max_fee.saturating_add(max_fee.div_ceil(8)), tip.saturating_add(tip.div_ceil(8)))
+    (
+        max_fee.saturating_add(max_fee.div_ceil(8)),
+        tip.saturating_add(tip.div_ceil(8)),
+    )
 }
 
 /// Send everything above the sweep's own fee to `refund`; returns the wei sent (0 = not worth a tx).
@@ -449,17 +625,30 @@ fn bump((max_fee, tip): (u128, u128)) -> (u128, u128) {
 /// for itself. Every failure re-reads the state and tries again: "nonce too low" or another tx mined at our
 /// nonce (the deploy won after all), an underpriced replacement or a sweep that stays unmined (fee raised
 /// another 12.5 %), insufficient funds (an L2 data fee on top of gas: reserve doubled).
-async fn sweep(p: &impl Provider, sender: Address, refund: Address, sent: (u128, u128), secrets: &[String]) -> Result<U256, String> {
+async fn sweep(
+    p: &impl Provider,
+    sender: Address,
+    refund: Address,
+    sent: (u128, u128),
+    secrets: &[String],
+) -> Result<U256, String> {
     let mut floor = bump(sent);
     let mut reserve_mul = 1u64;
     let mut last = String::new();
     for attempt in 0..SWEEP_TRIES {
         if attempt > 0 {
-            log!("sweep attempt {attempt} failed, retrying: {}", scrub(last.clone(), secrets));
+            log!(
+                "sweep attempt {attempt} failed, retrying: {}",
+                scrub(last.clone(), secrets)
+            );
             tokio::time::sleep(POLL).await;
         }
         let state = async {
-            let nonce = p.get_transaction_count(sender).latest().await.map_err(e("nonce"))?;
+            let nonce = p
+                .get_transaction_count(sender)
+                .latest()
+                .await
+                .map_err(e("nonce"))?;
             let balance = p.get_balance(sender).latest().await.map_err(e("balance"))?;
             Ok::<_, String>((nonce, balance, quote_fees(p).await?))
         };
@@ -473,7 +662,10 @@ async fn sweep(p: &impl Provider, sender: Address, refund: Address, sent: (u128,
         let (max_fee, tip) = (quoted_fee.max(floor.0), quoted_tip.max(floor.1));
         let reserve = U256::from(SWEEP_GAS) * U256::from(max_fee) * U256::from(reserve_mul);
         if balance <= reserve {
-            log!("nothing to sweep: {} at {sender} does not cover the sweep's fee", amount(balance));
+            log!(
+                "nothing to sweep: {} at {sender} does not cover the sweep's fee",
+                amount(balance)
+            );
             return Ok(U256::ZERO);
         }
         let value = balance - reserve;
@@ -497,16 +689,26 @@ async fn sweep(p: &impl Provider, sender: Address, refund: Address, sent: (u128,
                 continue;
             }
         };
-        log!("sweep tx {hash} sent: {} to {refund}, nonce {nonce}, max fee {max_fee} wei/gas", amount(value));
+        log!(
+            "sweep tx {hash} sent: {} to {refund}, nonce {nonce}, max fee {max_fee} wei/gas",
+            amount(value)
+        );
         match mined(p, hash, sender, nonce).await {
             Ok(true) => {
                 log!("swept {} to {refund}", amount(value));
                 if let Ok(left) = p.get_balance(sender).latest().await {
-                    log!("left at {sender}: {} (unused part of the sweep's fee reserve)", amount(left));
+                    log!(
+                        "left at {sender}: {} (unused part of the sweep's fee reserve)",
+                        amount(left)
+                    );
                 }
                 return Ok(value);
             }
-            Ok(false) => last = format!("sweep tx {hash} did not take effect: another tx with nonce {nonce} was mined, or it reverted"),
+            Ok(false) => {
+                last = format!(
+                    "sweep tx {hash} did not take effect: another tx with nonce {nonce} was mined, or it reverted"
+                )
+            }
             Err(err) => {
                 last = err;
                 floor = bump((max_fee, tip));
@@ -524,13 +726,20 @@ async fn mined(p: &impl Provider, hash: B256, sender: Address, nonce: u64) -> Re
         if let Ok(Some(r)) = p.get_transaction_receipt(hash).await {
             return Ok(r.status());
         }
-        if p.get_transaction_count(sender).latest().await.is_ok_and(|n| n > nonce) {
+        if p.get_transaction_count(sender)
+            .latest()
+            .await
+            .is_ok_and(|n| n > nonce)
+        {
             // The nonce is used; ours may have been mined between the two calls, so look once more.
             return Ok(matches!(p.get_transaction_receipt(hash).await, Ok(Some(r)) if r.status()));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    Err(format!("sweep tx {hash} not mined within {} s", SWEEP_WAIT.as_secs()))
+    Err(format!(
+        "sweep tx {hash} not mined within {} s",
+        SWEEP_WAIT.as_secs()
+    ))
 }
 
 #[cfg(test)]
@@ -546,7 +755,11 @@ mod tests {
         assert_eq!(code[10], 0x00); // the copy offset 0x0a lands exactly on the STOP byte
         assert_eq!(&code[11..], &rec);
         assert!(holds_record(&code[10..], &rec));
-        assert!(!holds_record(&code[11..], &rec) && !holds_record(&[], &rec) && !holds_record(&code[10..code.len() - 1], &rec));
+        assert!(
+            !holds_record(&code[11..], &rec)
+                && !holds_record(&[], &rec)
+                && !holds_record(&code[10..code.len() - 1], &rec)
+        );
     }
 
     #[test]
@@ -561,20 +774,43 @@ mod tests {
 
     #[test]
     fn uri_has_chain_id() {
-        let r = FundRequest { sender: address!("00000000000000000000000000000000000000aa"), chain_id: 4153, required_wei: U256::from(7), refund: Address::ZERO };
-        assert_eq!(r.uri(), "ethereum:0x00000000000000000000000000000000000000AA@4153?value=7");
+        let r = FundRequest {
+            sender: address!("00000000000000000000000000000000000000aa"),
+            chain_id: 4153,
+            required_wei: U256::from(7),
+            refund: Address::ZERO,
+        };
+        assert_eq!(
+            r.uri(),
+            "ethereum:0x00000000000000000000000000000000000000AA@4153?value=7"
+        );
     }
 
     #[test]
     fn scrub_hides_raw_and_normalized_urls() {
         let s = secret_forms(&["https://rpc.x/key/SECRET", ""]);
-        assert!(!scrub("error sending request for url (https://rpc.x/key/SECRET)".into(), &s).contains("SECRET"));
+        assert!(
+            !scrub(
+                "error sending request for url (https://rpc.x/key/SECRET)".into(),
+                &s
+            )
+            .contains("SECRET")
+        );
         // reqwest prints the parsed URL: lowercase scheme and host, default port dropped.
         let s = secret_forms(&["HTTPS://RPC.X:443/key/SECRET"]);
-        assert!(!scrub("error sending request for url (https://rpc.x/key/SECRET)".into(), &s).contains("SECRET"));
+        assert!(
+            !scrub(
+                "error sending request for url (https://rpc.x/key/SECRET)".into(),
+                &s
+            )
+            .contains("SECRET")
+        );
         // A bare host gets a trailing slash when parsed; the unparsed form must not leave it behind.
         let s = secret_forms(&["http://SECRET.example"]);
-        assert_eq!(scrub("for url (http://secret.example/)".into(), &s), "for url (<rpc>)");
+        assert_eq!(
+            scrub("for url (http://secret.example/)".into(), &s),
+            "for url (<rpc>)"
+        );
     }
 
     #[test]
@@ -586,9 +822,18 @@ mod tests {
 
     #[test]
     fn tip_is_capped_by_base_fee() {
-        assert_eq!(fees_from(30_000_000_000, 2_000_000_000), (62_000_000_000, 2_000_000_000)); // below cap: kept
-        assert_eq!(fees_from(1_000_000, 1_000_000_000), (2_000_000 + TIP_CAP_FLOOR, TIP_CAP_FLOOR)); // L2: floored cap
-        assert_eq!(fees_from(50_000_000_000, 80_000_000_000), (150_000_000_000, 50_000_000_000)); // cap = base
+        assert_eq!(
+            fees_from(30_000_000_000, 2_000_000_000),
+            (62_000_000_000, 2_000_000_000)
+        ); // below cap: kept
+        assert_eq!(
+            fees_from(1_000_000, 1_000_000_000),
+            (2_000_000 + TIP_CAP_FLOOR, TIP_CAP_FLOOR)
+        ); // L2: floored cap
+        assert_eq!(
+            fees_from(50_000_000_000, 80_000_000_000),
+            (150_000_000_000, 50_000_000_000)
+        ); // cap = base
     }
 
     #[test]

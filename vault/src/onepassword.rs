@@ -25,13 +25,23 @@ fn run(args: &[&str], input: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit()) // op's own messages ("unlock 1Password", errors) must reach the user
         .spawn()
-        .map_err(|e| format!("cannot run op: {e} (install the 1Password CLI and turn on its app integration)"))?;
+        .map_err(|e| {
+            format!(
+                "cannot run op: {e} (install the 1Password CLI and turn on its app integration)"
+            )
+        })?;
     // A write error just means op exited early; its exit status below is the real answer.
-    let _ = child.stdin.take().expect("piped stdin").write_all(input.as_bytes());
+    let _ = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes());
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let stdout = Zeroizing::new(out.stdout);
     if !out.status.success() {
-        return Err("op failed (1Password locked, Touch ID cancelled, wrong vault or item?)".into());
+        return Err(
+            "op failed (1Password locked, Touch ID cancelled, wrong vault or item?)".into(),
+        );
     }
     Ok(stdout)
 }
@@ -39,14 +49,31 @@ fn run(args: &[&str], input: &str) -> Result<Zeroizing<Vec<u8>>, String> {
 /// Vault and item names go into the JSON template and the `op://` reference, so only plain characters
 /// are allowed: no quotes (JSON), no slash (reference separator), no control characters.
 pub fn check_name(what: &str, s: &str) -> Result<(), String> {
-    let ok = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || " -_.".contains(c));
-    if ok { Ok(()) } else { Err(format!("{what} may only hold letters, digits, space, '-', '_' and '.'")) }
+    let ok = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || " -_.".contains(c));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what} may only hold letters, digits, space, '-', '_' and '.'"
+        ))
+    }
 }
 
 /// An account as `op --account` takes it: a sign-in address, an email or an account id. No spaces.
 pub fn check_account(s: &str) -> Result<(), String> {
-    let ok = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c));
-    if ok { Ok(()) } else { Err("1Password account: give its sign-in address, email or id (see `op account list`)".into()) }
+    let ok = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c));
+    if ok {
+        Ok(())
+    } else {
+        Err(
+            "1Password account: give its sign-in address, email or id (see `op account list`)"
+                .into(),
+        )
+    }
 }
 
 pub fn reference(vault: &str, title: &str) -> String {
@@ -65,7 +92,18 @@ pub fn store(account: &str, vault: &str, title: &str, words: &str) -> Result<Str
     let template = Zeroizing::new(format!(
         r#"{{"title":"{title}","category":"PASSWORD","fields":[{{"id":"password","type":"CONCEALED","purpose":"PASSWORD","label":"password","value":"{words}"}}]}}"#
     ));
-    run(&["item", "create", "--account", account, "--vault", vault, "-"], &template)?; // its output is dropped
+    run(
+        &[
+            "item",
+            "create",
+            "--account",
+            account,
+            "--vault",
+            vault,
+            "-",
+        ],
+        &template,
+    )?; // its output is dropped
     Ok(reference(vault, title))
 }
 
@@ -76,7 +114,10 @@ pub fn read(account: &str, reference: &str) -> Result<Zeroizing<String>, String>
     if !ok {
         return Err("not a 1Password reference (op://vault/item/field)".into());
     }
-    let out = run(&["read", "--account", account, "--no-newline", reference], "")?;
+    let out = run(
+        &["read", "--account", account, "--no-newline", reference],
+        "",
+    )?;
     let text = std::str::from_utf8(&out).map_err(|_| "op returned non-text".to_string())?;
     Ok(Zeroizing::new(text.trim().to_string()))
 }
@@ -99,11 +140,16 @@ pub fn sheet_references(sheet: &str) -> Vec<SheetRef> {
         .lines()
         .filter_map(|l| {
             let mut t = l.strip_prefix(SHEET_PREFIX)?.split_whitespace();
-            let (Some("share"), Some(x), Some(r), Some("account"), Some(a)) = (t.next(), t.next(), t.next(), t.next(), t.next())
+            let (Some("share"), Some(x), Some(r), Some("account"), Some(a)) =
+                (t.next(), t.next(), t.next(), t.next(), t.next())
             else {
                 return None;
             };
-            Some(SheetRef { x: x.parse().ok()?, reference: r.to_string(), account: a.to_string() })
+            Some(SheetRef {
+                x: x.parse().ok()?,
+                reference: r.to_string(),
+                account: a.to_string(),
+            })
         })
         .collect()
 }
@@ -118,10 +164,25 @@ mod tests {
         for bad in ["", "a\"b", "a/b", "a\nb"] {
             assert!(check_name("v", bad).is_err(), "{bad:?}");
         }
-        let line = sheet_line(2, "op://Personal/epn-share-2-ab/password", "my.1password.com");
+        let line = sheet_line(
+            2,
+            "op://Personal/epn-share-2-ab/password",
+            "my.1password.com",
+        );
         let refs = sheet_references(&format!("x\n{line}   (read with `op read`)\n"));
         assert_eq!(refs.len(), 1);
-        assert_eq!((refs[0].x, refs[0].reference.as_str(), refs[0].account.as_str()), (2, "op://Personal/epn-share-2-ab/password", "my.1password.com"));
+        assert_eq!(
+            (
+                refs[0].x,
+                refs[0].reference.as_str(),
+                refs[0].account.as_str()
+            ),
+            (
+                2,
+                "op://Personal/epn-share-2-ab/password",
+                "my.1password.com"
+            )
+        );
         // A line without its account is not trusted: restore then asks rather than letting op guess.
         assert!(sheet_references("1password: share 2 op://Personal/x/password\n").is_empty());
         for bad in ["", "my 1password", "a;b"] {

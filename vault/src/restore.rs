@@ -24,9 +24,21 @@ fn read_record() -> Result<(Vec<u8>, Header, SheetHints), String> {
         let path = std::path::Path::new(&input);
         let (text, hints) = if path.is_file() {
             let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-            let sheet = std::fs::read_to_string(path.with_file_name("recovery-sheet.txt")).unwrap_or_default();
-            let cred = sheet.lines().find_map(|l| l.strip_prefix("credential:")?.split_whitespace().next().map(str::to_string));
-            (text, SheetHints { cred, op_refs: onepassword::sheet_references(&sheet) })
+            let sheet = std::fs::read_to_string(path.with_file_name("recovery-sheet.txt"))
+                .unwrap_or_default();
+            let cred = sheet.lines().find_map(|l| {
+                l.strip_prefix("credential:")?
+                    .split_whitespace()
+                    .next()
+                    .map(str::to_string)
+            });
+            (
+                text,
+                SheetHints {
+                    cred,
+                    op_refs: onepassword::sheet_references(&sheet),
+                },
+            )
         } else {
             (input.clone(), SheetHints::default())
         };
@@ -49,7 +61,9 @@ fn label(kind: Kind, in_1password: bool) -> &'static str {
 
 pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     clear();
-    println!("Restore your seed. You need the record and enough of its factors (2 of 3 for a backup made by `vault`).\n");
+    println!(
+        "Restore your seed. You need the record and enough of its factors (2 of 3 for a backup made by `vault`).\n"
+    );
     println!("  1. restore: show the seed words (do this offline, nobody watching the screen)");
     println!("  2. verify only: check the factors and show the seed fingerprint, never the seed\n");
     let verify_only = choose_1_or_2()? == 2;
@@ -58,24 +72,38 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     let op_ref = |x: u8| hints.op_refs.iter().find(|r| r.x == x);
 
     let held: Vec<u8> = loop {
-        println!("\nThis record needs any {} of its {} factors. Which do you have with you?", h.k, h.kinds.len());
+        println!(
+            "\nThis record needs any {} of its {} factors. Which do you have with you?",
+            h.k,
+            h.kinds.len()
+        );
         let mut held = Vec::new();
         for (i, &kind) in h.kinds.iter().enumerate() {
             let x = i as u8 + 1;
-            if yes(&format!("  share {x}: {}", label(kind, op_ref(x).is_some())))? {
+            if yes(&format!(
+                "  share {x}: {}",
+                label(kind, op_ref(x).is_some())
+            ))? {
                 held.push(x);
             }
         }
         if held.len() >= h.k {
             break held;
         }
-        println!("At least {} are needed; with fewer the seed cannot be restored.", h.k);
+        println!(
+            "At least {} are needed; with fewer the seed cannot be restored.",
+            h.k
+        );
     };
     let kind = |x: u8| h.kinds[x as usize - 1];
 
     // The keys first: a missing key or a wrong PIN should fail before any typing.
     let mut hardware = Zeroizing::new(Vec::with_capacity(5)); // never reallocates: a move would leave an unwiped copy
-    let keys: Vec<u8> = held.iter().copied().filter(|&x| kind(x) == Kind::Hardware).collect();
+    let keys: Vec<u8> = held
+        .iter()
+        .copied()
+        .filter(|&x| kind(x) == Kind::Hardware)
+        .collect();
     // The sheet names the credential of the one YubiKey `vault` enrolls; with several keys it cannot say
     // which share it belongs to, so each is asked for.
     if keys.len() != 1 {
@@ -84,7 +112,9 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     for &x in &keys {
         let cred = match sheet_cred.take() {
             Some(c) => c,
-            None => ask(&format!("Credential id of the YubiKey that is share {x} (from your recovery sheet): "))?,
+            None => ask(&format!(
+                "Credential id of the YubiKey that is share {x} (from your recovery sheet): "
+            ))?,
         };
         println!("\nEnter the PIN, then touch the YubiKey that is share {x} when it blinks.");
         hardware.push((x, fido::secret(&cred, device.as_deref())?));
@@ -92,21 +122,37 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
 
     // What is typed (passphrase, paper words) by share number, so a failed attempt can retype any of them.
     let mut typed: BTreeMap<u8, Zeroizing<String>> = BTreeMap::new();
-    let mut redo: Vec<u8> = held.iter().copied().filter(|&x| kind(x) != Kind::Hardware).collect();
+    let mut redo: Vec<u8> = held
+        .iter()
+        .copied()
+        .filter(|&x| kind(x) != Kind::Hardware)
+        .collect();
     for attempt in 1..=TRIES {
         for &x in &redo {
             println!();
             let secret = match (kind(x), op_ref(x)) {
                 (Kind::Passphrase, _) => ask_hidden("passphrase, exactly as written (hidden): ")?,
-                (_, Some(r)) if yes(&format!("Read share {x} from 1Password ({}, account {}); it asks for Touch ID?", r.reference, r.account))? => {
+                (_, Some(r))
+                    if yes(&format!(
+                        "Read share {x} from 1Password ({}, account {}); it asks for Touch ID?",
+                        r.reference, r.account
+                    ))? =>
+                {
                     onepassword::read(&r.account, &r.reference)?
                 }
                 _ => enter_paper_share(x)?,
             };
             typed.insert(x, secret);
         }
-        let pass = typed.iter().find(|&(&x, _)| kind(x) == Kind::Passphrase).map(|(_, p)| p.as_str());
-        let paper: Vec<(u8, &str)> = typed.iter().filter(|&(&x, _)| kind(x) == Kind::Paper).map(|(&x, w)| (x, w.as_str())).collect();
+        let pass = typed
+            .iter()
+            .find(|&(&x, _)| kind(x) == Kind::Passphrase)
+            .map(|(_, p)| p.as_str());
+        let paper: Vec<(u8, &str)> = typed
+            .iter()
+            .filter(|&(&x, _)| kind(x) == Kind::Paper)
+            .map(|(&x, w)| (x, w.as_str()))
+            .collect();
         if pass.is_some() {
             println!("Stretching the passphrase (Argon2id, 1 GiB; takes a while)...");
         }
@@ -117,7 +163,9 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
                     let entropy = Zeroizing::new(words_to_entropy(&words)?);
                     println!("\nVerified: shares {used:?} open the record.");
                     println!("Seed fingerprint: {}", seed_fingerprint(&entropy));
-                    println!("It must match the fingerprint on your recovery sheet (and the one shown at backup).");
+                    println!(
+                        "It must match the fingerprint on your recovery sheet (and the one shown at backup)."
+                    );
                     return Ok(());
                 }
                 clear();
@@ -133,10 +181,15 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
                 if attempt == TRIES {
                     break;
                 }
-                println!("Passphrase: lowercase, one space between words, exactly as written. Paper share: words in order.");
+                println!(
+                    "Passphrase: lowercase, one space between words, exactly as written. Paper share: words in order."
+                );
                 redo = Vec::new();
                 for &x in typed.keys() {
-                    if yes(&format!("Enter share {x} ({}) again?", label(kind(x), op_ref(x).is_some())))? {
+                    if yes(&format!(
+                        "Enter share {x} ({}) again?",
+                        label(kind(x), op_ref(x).is_some())
+                    ))? {
                         redo.push(x);
                     }
                 }

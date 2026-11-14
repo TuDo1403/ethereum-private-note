@@ -34,10 +34,16 @@ fn run(tool: &str, args: &[&str], input: &str) -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("cannot run {tool}: {e} (install libfido2: `brew install libfido2` or `apt install fido2-tools`)"))?;
     // A write error just means the tool exited early; its exit status below is the real answer.
-    let _ = child.stdin.take().expect("piped stdin").write_all(input.as_bytes());
+    let _ = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes());
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("{tool} failed (wrong PIN, key not touched in time, or wrong credential id?)"));
+        return Err(format!(
+            "{tool} failed (wrong PIN, key not touched in time, or wrong credential id?)"
+        ));
     }
     String::from_utf8(out.stdout).map_err(|_| format!("{tool} printed non-UTF-8 output"))
 }
@@ -48,11 +54,17 @@ fn device_path(given: Option<&str>) -> Result<String, String> {
         return Ok(d.to_string());
     }
     let listing = run("fido2-token", &["-L"], "")?;
-    let paths: Vec<&str> = listing.lines().filter_map(|l| l.split_once(": vendor").map(|(p, _)| p)).collect();
+    let paths: Vec<&str> = listing
+        .lines()
+        .filter_map(|l| l.split_once(": vendor").map(|(p, _)| p))
+        .collect();
     match paths.as_slice() {
         [one] => Ok(one.to_string()),
         [] => Err("no FIDO2 key found: plug in the YubiKey".into()),
-        _ => Err(format!("several FIDO2 keys found, pick one with --device: {}", paths.join(", "))),
+        _ => Err(format!(
+            "several FIDO2 keys found, pick one with --device: {}",
+            paths.join(", ")
+        )),
     }
 }
 
@@ -69,7 +81,10 @@ pub fn enroll(device: Option<&str>) -> Result<String, String> {
 
 /// Non-empty base64 on line `i`, or an error naming the tool.
 fn b64_line(lines: &[&str], i: usize, tool: &str) -> Result<Vec<u8>, String> {
-    Base64::decode_vec(lines[i]).ok().filter(|b| !b.is_empty()).ok_or(format!("{tool}: unexpected output (line {})", i + 1))
+    Base64::decode_vec(lines[i])
+        .ok()
+        .filter(|b| !b.is_empty())
+        .ok_or(format!("{tool}: unexpected output (line {})", i + 1))
 }
 
 /// `fido2-cred -M` output (fido2-cred(1)): client data hash, rp id, attestation format, authenticator
@@ -78,8 +93,14 @@ fn b64_line(lines: &[&str], i: usize, tool: &str) -> Result<Vec<u8>, String> {
 fn parse_cred(out: &str) -> Result<String, String> {
     let lines: Vec<&str> = out.lines().collect();
     let tool = "fido2-cred";
-    if !(6..=7).contains(&lines.len()) || lines[0] != client_data_hash() || lines[1] != RP_ID || lines[2].is_empty() {
-        return Err(format!("{tool}: unexpected output (not a credential for {RP_ID})"));
+    if !(6..=7).contains(&lines.len())
+        || lines[0] != client_data_hash()
+        || lines[1] != RP_ID
+        || lines[2].is_empty()
+    {
+        return Err(format!(
+            "{tool}: unexpected output (not a credential for {RP_ID})"
+        ));
     }
     for i in [3, 4, 5].into_iter().chain((lines.len() == 7).then_some(6)) {
         b64_line(&lines, i, tool)?;
@@ -94,15 +115,20 @@ fn parse_assert(out: &str) -> Result<[u8; 32], String> {
     let lines: Vec<&str> = out.lines().collect();
     let tool = "fido2-assert";
     if lines.len() != 5 || lines[0] != client_data_hash() || lines[1] != RP_ID {
-        return Err(format!("{tool}: unexpected output (expected one assertion for {RP_ID} with hmac-secret)"));
+        return Err(format!(
+            "{tool}: unexpected output (expected one assertion for {RP_ID} with hmac-secret)"
+        ));
     }
     b64_line(&lines, 2, tool)?;
     b64_line(&lines, 3, tool)?;
-    let secret = <[u8; 32]>::try_from(b64_line(&lines, 4, tool)?)
-        .map_err(|_| format!("{tool} returned no 32-byte hmac-secret (credential made without hmac-secret?)"))?;
+    let secret = <[u8; 32]>::try_from(b64_line(&lines, 4, tool)?).map_err(|_| {
+        format!("{tool} returned no 32-byte hmac-secret (credential made without hmac-secret?)")
+    })?;
     // A real hmac-secret output is an HMAC-SHA-256; all zeros means something else was parsed.
     if secret == [0; 32] {
-        return Err(format!("{tool} returned an all-zero hmac-secret; refusing it"));
+        return Err(format!(
+            "{tool} returned an all-zero hmac-secret; refusing it"
+        ));
     }
     Ok(secret)
 }
@@ -112,7 +138,11 @@ pub fn secret(cred_id: &str, device: Option<&str>) -> Result<[u8; 32], String> {
     // The id is pasted into the tool's line-based input, so it must be plain base64 (no newline smuggling).
     Base64::decode_vec(cred_id).map_err(|_| "credential id is not valid base64".to_string())?;
     let dev = device_path(device)?;
-    let input = format!("{}\n{RP_ID}\n{cred_id}\n{}\n", client_data_hash(), Base64::encode_string(&salt()));
+    let input = format!(
+        "{}\n{RP_ID}\n{cred_id}\n{}\n",
+        client_data_hash(),
+        Base64::encode_string(&salt())
+    );
     // -v: user verification (PIN). Required, not optional: CTAP2 hmac-secret keeps separate secrets for
     // assertions with and without UV, so dropping -v would silently give a different secret.
     let out = run("fido2-assert", &["-G", "-h", "-v", "-p", &dev], &input)?;
@@ -133,7 +163,12 @@ mod tests {
 
     #[test]
     fn assertion_output_is_parsed_strictly() {
-        let (hash, auth, sig, secret) = (client_data_hash(), b64(&[1; 37]), b64(&[2; 70]), b64(&[7; 32]));
+        let (hash, auth, sig, secret) = (
+            client_data_hash(),
+            b64(&[1; 37]),
+            b64(&[2; 70]),
+            b64(&[7; 32]),
+        );
         let good = [hash.as_str(), RP_ID, &auth, &sig, &secret];
         assert_eq!(parse_assert(&assert_out(&good)).unwrap(), [7; 32]);
         // The audit case: one line, the client data hash (32 zero bytes), must not become the hardware secret.
@@ -159,14 +194,44 @@ mod tests {
 
     #[test]
     fn credential_output_is_parsed_strictly() {
-        let (hash, auth, id, sig, cert) = (client_data_hash(), b64(&[1; 37]), b64(&[3; 48]), b64(&[2; 70]), b64(&[4; 300]));
+        let (hash, auth, id, sig, cert) = (
+            client_data_hash(),
+            b64(&[1; 37]),
+            b64(&[3; 48]),
+            b64(&[2; 70]),
+            b64(&[4; 300]),
+        );
         let good = [hash.as_str(), RP_ID, "packed", &auth, &id, &sig, &cert];
         assert_eq!(parse_cred(&assert_out(&good)).unwrap(), id);
-        assert_eq!(parse_cred(&assert_out(&good[..6])).unwrap(), id, "no certificate");
+        assert_eq!(
+            parse_cred(&assert_out(&good[..6])).unwrap(),
+            id,
+            "no certificate"
+        );
         assert!(parse_cred(&assert_out(&good[..5])).is_err());
         assert!(parse_cred(&assert_out(&[&hash])).is_err());
-        assert!(parse_cred(&assert_out(&[hash.as_str(), "example.com", "packed", &auth, &id, &sig])).is_err());
-        assert!(parse_cred(&assert_out(&[hash.as_str(), RP_ID, "packed", &auth, "", &sig])).is_err());
+        assert!(
+            parse_cred(&assert_out(&[
+                hash.as_str(),
+                "example.com",
+                "packed",
+                &auth,
+                &id,
+                &sig
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_cred(&assert_out(&[
+                hash.as_str(),
+                RP_ID,
+                "packed",
+                &auth,
+                "",
+                &sig
+            ]))
+            .is_err()
+        );
         assert!(parse_cred(&assert_out(&[hash.as_str(), RP_ID, "", &auth, &id, &sig])).is_err());
     }
 }
