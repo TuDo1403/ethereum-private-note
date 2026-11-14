@@ -8,7 +8,7 @@
 //!
 //! Nothing here is needed to restore: `recover` and SPEC.md stand alone.
 
-use backup_core::*;
+use epn_core::*;
 use std::io::{IsTerminal, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;

@@ -1,4 +1,6 @@
-# Backup format v1
+# Ethereum Private Note: backup format
+
+# Format v1
 
 Enough to reimplement recovery in any language. `vectors.json` holds fixed inputs and every intermediate
 value; an implementation is correct if it reproduces them. Print this with share C.

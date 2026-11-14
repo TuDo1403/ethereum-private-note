@@ -6,7 +6,7 @@ use alloy::{
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
 };
-use publish::{BlobStore, CANONICAL_ADDRESS, CREATE2_DEPLOYER, FundRequest, Options, RECORD_LEN, publish as run};
+use epn_publish::{BlobStore, CANONICAL_ADDRESS, CREATE2_DEPLOYER, FundRequest, Options, RECORD_LEN, publish as run};
 use std::sync::{Arc, Mutex};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -63,7 +63,7 @@ async fn send_eth(url: &str, to: Address, wei: U256) {
 }
 
 /// Run the flow, funding the throwaway sender from the dev account whenever asked (`pct` of the ask).
-async fn run_funded_opts(o: &Options<'_>, record: &[u8], pct: u64) -> Result<publish::Outcome, String> {
+async fn run_funded_opts(o: &Options<'_>, record: &[u8], pct: u64) -> Result<epn_publish::Outcome, String> {
     let url = o.rpc_url.to_string();
     run(o, record, move |r: &FundRequest| {
         let (url, to, wei) = (url.clone(), r.sender, r.required_wei * U256::from(pct) / U256::from(100));
@@ -72,7 +72,7 @@ async fn run_funded_opts(o: &Options<'_>, record: &[u8], pct: u64) -> Result<pub
     .await
 }
 
-async fn run_funded(url: &str, record: &[u8]) -> Result<publish::Outcome, String> {
+async fn run_funded(url: &str, record: &[u8]) -> Result<epn_publish::Outcome, String> {
     run_funded_opts(&opts(url), record, 100).await
 }
 

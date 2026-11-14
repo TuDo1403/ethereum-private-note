@@ -1052,20 +1052,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "backup-core"
-version = "2.0.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "base64ct",
- "getrandom 0.2.17",
- "hkdf",
- "serde_json",
- "sha2",
- "unicode-normalization",
-]
-
-[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1724,6 +1710,45 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "epn-core"
+version = "2.0.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "base64ct",
+ "getrandom 0.2.17",
+ "hkdf",
+ "serde_json",
+ "sha2",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "epn-publish"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "tokio",
+]
+
+[[package]]
+name = "epn-recover"
+version = "3.0.0"
+dependencies = [
+ "epn-core",
+ "serde_json",
+]
+
+[[package]]
+name = "epn-vault"
+version = "0.1.0"
+dependencies = [
+ "epn-core",
+ "rpassword",
+ "zeroize",
 ]
 
 [[package]]
@@ -2993,14 +3018,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "publish"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "tokio",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3122,14 +3139,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
 dependencies = [
  "rustversion",
-]
-
-[[package]]
-name = "recover"
-version = "3.0.0"
-dependencies = [
- "backup-core",
- "serde_json",
 ]
 
 [[package]]
@@ -4126,15 +4135,6 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
-name = "vault"
-version = "0.1.0"
-dependencies = [
- "backup-core",
- "rpassword",
- "zeroize",
-]
 
 [[package]]
 name = "vcpkg"

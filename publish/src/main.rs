@@ -1,6 +1,6 @@
 //! `publish [flags] <rpc-url> <record.hex> <refund-address>`; missing positionals are prompted for.
 //! Flags: `--verify-rpc <url>` (second RPC, read-back only), `--confirmations <n>`, `--allow-high-fees`.
-use publish::{FundRequest, Options, parse_address, parse_record};
+use epn_publish::{FundRequest, Options, parse_address, parse_record};
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ fn run() -> Result<(), String> {
 
     let opts = Options { rpc_url: &rpc, verify_rpc_url: verify.as_deref(), refund, fund_timeout: FUND_TIMEOUT, confirmations, allow_high_fees };
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    let out = rt.block_on(publish::publish(&opts, &record, |r: &FundRequest| {
+    let out = rt.block_on(epn_publish::publish(&opts, &record, |r: &FundRequest| {
         // QR rendering skipped on purpose: most wallets accept the URI or address as text.
         println!("\nFund this THROWAWAY address (its key exists only in this process):");
         println!("  {}\n  {}", r.sender, r.uri());

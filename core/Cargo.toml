@@ -1,5 +1,5 @@
 [package]
-name = "backup-core"
+name = "epn-core"
 version = "2.0.0"
 edition = "2024"
 rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum

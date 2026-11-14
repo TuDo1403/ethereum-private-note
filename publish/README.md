@@ -1,9 +1,9 @@
-# publish
+# publish (Ethereum Private Note)
 
 Publishes a 147-byte `record.hex` (from `vault`) to the canonical `BlobStore` contract, paying gas from a
 throwaway key that exists only in memory. Only public data goes on chain.
 
-    cargo run --offline --locked -p publish -- [--verify-rpc <url>] [--confirmations <n>] [--allow-high-fees] \
+    cargo run --offline --locked -p epn-publish -- [--verify-rpc <url>] [--confirmations <n>] [--allow-high-fees] \
         <rpc-url> <record.hex> <refund-address>
 
 Missing arguments are prompted for. It prints the throwaway address and an `ethereum:` URI, waits (15 min)
@@ -11,7 +11,8 @@ for the funds, deploys `BlobStore` if needed, stores and reads back the record, 
 refund address, then prints chain id, contract and sender for the recovery sheet.
 
 **Canonical address** `0x0356F8a3FD7ef15B775896B63f822307547D8971` on every chain: CREATE2 through
-`0x4e59b44847b379578588920ca78fbf26c0b4956c`, salt `keccak256("onchain-safe/BlobStore/v1")`. Existing code
+`0x4e59b44847b379578588920ca78fbf26c0b4956c`, salt `keccak256("onchain-safe/BlobStore/v1")` (the project's old name; it is part of the address and must
+never change). Existing code
 there is accepted only if its hash is `RUNTIME_CODE_HASH`. A chain without the CREATE2 deployer is refused.
 
 **Reproduce the bytecode** (solc 0.8.28, paris, optimizer 200, no metadata; see `foundry.toml`):

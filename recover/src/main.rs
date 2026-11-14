@@ -1,4 +1,4 @@
-use backup_core::*;
+use epn_core::*;
 use std::io::Read;
 
 // Restore only. Secrets (share C, passphrase) come from stdin, never from arguments, so none of them

@@ -23,7 +23,8 @@ sol! {
 pub const RECORD_LEN: usize = 147;
 /// The standard deterministic deployer (Arachnid): calldata = salt (32) ++ init code.
 pub const CREATE2_DEPLOYER: Address = address!("4e59b44847b379578588920ca78fbf26c0b4956c");
-/// keccak256("onchain-safe/BlobStore/v1")
+/// keccak256("onchain-safe/BlobStore/v1"). The string keeps the project's old name on purpose: the salt
+/// fixes the canonical address, so changing it would move the contract on every chain.
 pub const SALT: B256 = b256!("7752f52bd595bb427776f5f476d1f1e439316cb4e37afe83e07cae9306a0eff8");
 /// Compiled with the solc settings pinned in foundry.toml; regenerate per publish/README.md.
 const INIT_CODE_HEX: &str = include_str!("../blobstore.initcode.hex");

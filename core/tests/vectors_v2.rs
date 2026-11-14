@@ -1,5 +1,5 @@
-use backup_core::v2::*;
-use backup_core::{check_argon_cost, derive_pad_a, entropy_to_words, os_random, unhex, words_to_entropy};
+use epn_core::v2::*;
+use epn_core::{check_argon_cost, derive_pad_a, entropy_to_words, os_random, unhex, words_to_entropy};
 use serde_json::{json, Value};
 
 fn hex(b: &[u8]) -> String {
@@ -50,7 +50,7 @@ const SPECS: [Spec; 7] = [
 
 /// Everything in a vector is derived from the Spec by the code under test, so regenerating is only
 /// meaningful when the format changes on purpose. Run:
-///   cargo test --offline --locked -p backup-core --test vectors_v2 -- --ignored generate
+///   cargo test --offline --locked -p epn-core --test vectors_v2 -- --ignored generate
 #[test]
 #[ignore]
 fn generate() {
@@ -301,10 +301,10 @@ fn argon_cost_bounds() {
     // Both formats refuse before doing any work.
     assert!(new_header(1024, 17, &[0; 16], 2, &[S, H]).is_err());
     assert!(new_header(1 << 22, 1, &[0; 16], 2, &[S, H]).is_err());
-    let v1 = backup_core::new_header(1024, 17, &[0; 16]);
+    let v1 = epn_core::new_header(1024, 17, &[0; 16]);
     assert!(derive_pad_a("x", &v1).unwrap_err().contains("refusing"));
     // t = 16 at the smallest memory runs (fast), so the cap is inclusive in practice too.
-    assert!(derive_pad_a("x", &backup_core::new_header(8, 16, &[0; 16])).is_ok());
+    assert!(derive_pad_a("x", &epn_core::new_header(8, 16, &[0; 16])).is_ok());
 }
 
 #[test]
