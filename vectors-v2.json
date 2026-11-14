@@ -1,0 +1,249 @@
+[
+  {
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "entropy": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203",
+    "k": 2,
+    "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    "name": "fast-2-of-3-12-words",
+    "passphrase": "correct horse battery staple",
+    "random": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203f9c60f3948fce0c6377d500730e0e4ba28ea4fc4f0063b9914e1d7a77f574f036d04ba325a63efb6d64b578af30812885672db5ab14eb2b4c1daf63cb163b31cc3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc9f4a26e59d1729a63cf15278e4872f32",
+    "shares": [
+      {
+        "kind": "passphrase",
+        "pad": "1926efd9a8dcc0e6171d30675080c49a08caaf2410e6dbb934c1f7c71f372f63",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "b3c152c1a049d8aadb4d4cbaca2afd7c83bc9802e034d503675766a723ea17a3",
+        "secret": "42434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f6061",
+        "x": 2
+      },
+      {
+        "kind": "paper",
+        "share": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+        "words": "diamond juice drift apart senior advice flat main abandon ill click illegal harsh baby science screen boss offer elephant bar rebuild near dune impact",
+        "x": 3
+      }
+    ]
+  },
+  {
+    "argon2id_out": "dcf789adc2911f19e27c3b0211914b57d6db5f3084a334e20672a6f9ee85aeed",
+    "entropy": "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf03050102020303",
+    "k": 3,
+    "mnemonic": "arctic live gadget display excess mandate sniff autumn people disorder affair hole retreat fancy close tip deer village tuition orbit cannon owner maid spare",
+    "name": "fast-3-of-5-24-words-unicode-passphrase",
+    "passphrase": "ﬁancé ① pass phrase",
+    "random": "050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf03050102020303375e1076118f6220d163af412c125935ed642cb3db64a25ff41681b626ad677f9a9e62092c14ecc6ec307a2ed3576671fdeb150a5ef9885730a6b68b18294ac4e6b6e116875adbc39b8fa68c5677086dc3fdb2f87188f8203083667d1b89400ca5acb3bac1c8cfd6dde4ebf20f04edfdadee4ec815d33e80eba11490ddde601c68f983a0fd2b15d61f884fb4046a0556b5f9b4c8e3926a9667c57850e8",
+    "shares": [
+      {
+        "kind": "passphrase",
+        "pad": "1272234cd047adf60c07c43355125e3bf8788f196adc1d19b942da54cf5d9081",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "774cedb9a6a14c29322c4b509c37133bf6df476772ea8e6533ead7288af48233",
+        "secret": "52535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071",
+        "x": 2
+      },
+      {
+        "kind": "hardware",
+        "pad": "2b444e86ed0f9bcca5b3b7d239771d47a8a9c0b57dbbdef2d32fe7fea974a8db",
+        "secret": "535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172",
+        "x": 3
+      },
+      {
+        "kind": "paper",
+        "share": "58e56dd0b70a6197009457a1364d269b47fa48f52994ffb225d3108413e58e33",
+        "words": "flight clock injury host plastic slide across memory patrol raven endless custom leisure caught start crater zero muffin inquiry canal donkey version decide kitchen",
+        "x": 4
+      },
+      {
+        "kind": "paper",
+        "share": "78c54df057ea8177e0b47781162d46fb279a68d509b4df52c533f0a433c5ae13",
+        "words": "juice clerk lab quit pool room lizard moment library ramp faculty wagon keen crucial feature custom tent normal erupt throw drip tissue reunion grunt",
+        "x": 5
+      }
+    ]
+  },
+  {
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "entropy": "00112233445566778899aabbccddeeff",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf02020102",
+    "k": 2,
+    "mnemonic": "abandon math mimic master filter design carbon crystal rookie group knife young",
+    "name": "fast-2-of-2-no-paper",
+    "passphrase": "correct horse battery staple",
+    "random": "070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf020201025c5362d0c6a48e16089041675447c0ede4d35cb079ce3cc5426d18e623d875b7d4d1f8b9b621c2c97c1629be1ed313665d3826e6504e6e9ac21c40333bf1f9a2c7ced5dce3eaf1f8ff060d14964bca1edd51ca42e010def6a8fdd40e8228b9bc20bf2b1609fb2a957ad765d14a55dd972c2a810bfd71cd154208d897eb",
+    "shares": [
+      {
+        "kind": "passphrase",
+        "pad": "bcb38230e684ae3628f021073467e0cdc4f3bc50992e1ce5624d388643b81597",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "06181c46931fd1c17d1c3e823335e8b684fa69b22520d639689ddca4bd5c49d9",
+        "secret": "62636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081",
+        "x": 2
+      }
+    ]
+  },
+  {
+    "argon2id_out": "fb5eb544800ea8e02b16c1e6b34a50c89f612322f978605c42c10d86fbfbab37",
+    "entropy": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+    "header": "020010000003a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203",
+    "k": 2,
+    "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    "name": "real-parameters-2-of-3-12-words",
+    "passphrase": "correct horse battery staple",
+    "random": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910",
+    "record": "020010000003a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0203010203abb88f77c6a89079490e427a6b6c1cd377c2984aa6dccb8358fd7994123bfc6e6f2f7439eb0187af85aa5b165629d771411e035e63949410b00c666b3d7e7920c3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc3108d33822c80157d814ba0a7fe2904a",
+    "shares": [
+      {
+        "kind": "passphrase",
+        "pad": "4b586f972688b059696e221a0b0c3cf357e278aa463c2ba378dd59f4725b9c0e",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "b1ea9cca112bb0b388ac40266f0b388594d0400632eef3a71681f6f0aff7dd9f",
+        "secret": "42434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f6061",
+        "x": 2
+      },
+      {
+        "kind": "paper",
+        "share": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+        "words": "diamond juice drift apart senior advice flat main abandon ill click illegal harsh baby science screen boss offer elephant bar rebuild near dune impact",
+        "x": 3
+      }
+    ]
+  },
+  {
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "entropy": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf04050102020303",
+    "k": 4,
+    "mnemonic": "fog spot notable regret pizza coffee harvest ensure fog spot notable regret pizza coffee harvest ensure fog spell",
+    "name": "fast-4-of-5-24-bytes",
+    "passphrase": "correct horse battery staple",
+    "random": "0910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf040501020203035aef6ed1b32e75fa6d6792abe21f910f38c1415f3564a288d83d4ab17c17dc3ad099ef2a81e89ac06342b5c5656bea8a4c806e059857a2a4274dd48f05adf607dce9839b39caab95453c89b769449a1f0004861724aa57d32c197ddc0eb119b78990979ea5acb3bac1c8cfd6f0b9cf5f548131bc73a57f130b37409c4ced8aeac2d2930b15b1e9309329fae532394aa6878bd32940370928a9cd3c263b",
+    "shares": [
+      {
+        "kind": "passphrase",
+        "pad": "da6fee51b32e75faede7122b621f910f3841c1dfb5e4a288d83d4a31fc975c3a",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "26e8b301657bac812d7ba1569f37e304abc0031f1ba3a5d4ced3672dcee1efb8",
+        "secret": "72737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f9091",
+        "x": 2
+      },
+      {
+        "kind": "hardware",
+        "pad": "7885d78750eb7204ba8b06f07664c28fc8843ee70cca62ae89f4a877fd8a5acb",
+        "secret": "737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192",
+        "x": 3
+      },
+      {
+        "kind": "paper",
+        "share": "47ab1bd05e959c57ab60d03c5d022cc0a1af1fd49259985315de6e3859b59bc4",
+        "words": "element flee village rule flush cloth pulse borrow detail trend menu life brain morning false enroll obscure obvious jealous symbol machine suspect humor mountain",
+        "x": 4
+      },
+      {
+        "kind": "paper",
+        "share": "2238e395a6d051275127fce61036dbc13719c2b42e5870069cea31c7312bc6e0",
+        "words": "captain shove tornado ethics agree neck duty zebra toward like report list immense throw spawn slam hybrid crunch dentist glory indoor nominee breeze airport",
+        "x": 5
+      }
+    ]
+  },
+  {
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "entropy": "000102030405060708090a0b0c0d0e0f10111213",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf05050102020303",
+    "k": 5,
+    "mnemonic": "abandon amount liar amount expire adjust cage candy arch gather drum bullet absurd math exhibit",
+    "name": "fast-5-of-5-20-bytes",
+    "passphrase": "correct horse battery staple",
+    "random": "0b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf05050102020303c2ebe59beb78d0cefe6fdde6780267a51fed08c938f00b19b1ba3aee0b220895ab0beed7358ef64ea96000dbca670be6044b209df2420e20724064b136033acac41238f6bd7ca8b01db39d9f43ed84eb335121cc5b78d84648015ef90e6bc0a36b727980878e959ca3aab1b85a1689044305e794c71bc331a4a143f0ac712c0249a4b77879f2875b5cb91c78216e29630ca69971722b61e1ab79f93f23",
+    "shares": [
+      {
+        "kind": "passphrase",
+        "pad": "c9f9fc3b4cd66572bd258cbe27e48a51e46f8159af6e2e358280fb26c4f4d5f1",
+        "x": 1
+      },
+      {
+        "kind": "hardware",
+        "pad": "2b87bbee510d47187d53013d71c77293d435873604534d84984d97a57f46a64d",
+        "secret": "82838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1",
+        "x": 2
+      },
+      {
+        "kind": "hardware",
+        "pad": "931fd6f9fded5198b5ca8c5fccd9536639e370c71fed9ed1d34bf0863e014991",
+        "secret": "838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2",
+        "x": 3
+      },
+      {
+        "kind": "paper",
+        "share": "37b32726d7dfc7cf99918981700a9e1aad33a723d2da474f747c0901f074e09a",
+        "words": "dash odor situate quick wise treat green couple lift leopard pole crystal spring squeeze monster forget elder knife business bamboo business denial list element",
+        "x": 4
+      },
+      {
+        "kind": "paper",
+        "share": "f398903fa21ec17d8a36e955c8f2fa91eaada5ce53eff448e458dc60fd969ea4",
+        "words": "vicious setup avocado during ugly salute churn tag fiction elegant salt cat print spray deer law violin elbow bike rhythm average slender kind own",
+        "x": 5
+      }
+    ]
+  },
+  {
+    "argon2id_out": null,
+    "entropy": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+    "header": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf030403030303",
+    "k": 3,
+    "mnemonic": "pizza coffee harvest ensure fog spot notable regret pizza coffee harvest ensure fog spot notable regret pizza coffee harvest ensure fog spot notable sauce",
+    "name": "fast-3-of-4-all-paper",
+    "passphrase": "",
+    "random": "0d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa",
+    "record": "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf030403030303adb4bbc2c9d0d7dee5ecf3fa5005bfcfd67443e82f49d5a4f59bfc5aaeca0fe0d72eff06a2f596d6d7918b98cc3c3f006422359560901ef244f84b785c",
+    "shares": [
+      {
+        "kind": "paper",
+        "share": "2d343bc2c9d0d7de656c737a01080f161da4abb2b940474e555ce3eaf1f8ff86",
+        "words": "coffee peace vague neck aspect upset noble mobile key analyst adult club surge fiction slab chimney elder increase fire sick pyramid wise wrap sketch",
+        "x": 1
+      },
+      {
+        "kind": "paper",
+        "share": "d59ab783b2fde8d71b24794667584d0233476a251420350a4b74a49bdae5f0df",
+        "words": "stereo stick thought grass teach high hold monkey edit depart battle afford crucial relax nephew lottery crush false tag empty sad indicate sell what",
+        "x": 2
+      },
+      {
+        "kind": "paper",
+        "share": "f5ba9763521d08373b04596607382d6253674a0534c0d5eaab9484bbfac5d0bf",
+        "words": "volcano start sugar picnic spatial breeze ugly menu gravity degree area seven cushion pink below object sting fetch topple annual sausage glass drill visit",
+        "x": 3
+      },
+      {
+        "kind": "paper",
+        "share": "f006c5881fe9823f813cb40958e58e78ef23e01681cca71ac67b912cf04d265d",
+        "words": "useless curtain ginger divert oblige cabin agent notable announce shrimp glory vault vendor useless foam define poem stomach page car someone charge offer pyramid",
+        "x": 4
+      }
+    ]
+  }
+]

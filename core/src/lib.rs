@@ -4,6 +4,7 @@
 //! is correct if it reproduces the same vectors.
 
 pub mod fido;
+pub mod v2;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -18,6 +19,24 @@ pub const RECORD: usize = 147;
 // m comes from the record, i.e. from untrusted input. Refuse absurd values (2 GiB, twice the real
 // 1 GiB) instead of trying to allocate them.
 const MAX_M_KIB: u32 = 1 << 21;
+// t comes from the record too, and each pass costs as much time as the whole 1 GiB hash; the real
+// parameter is 3. 16 leaves room to raise it later and still bounds the time a forged record can burn.
+pub const MAX_T: u8 = 16;
+
+/// The range of Argon2 costs a record may ask for: m in 8..=2^21 KiB (8 is the Argon2 minimum for one
+/// lane), t in 1..=16. Checked on untrusted headers before any work is done.
+pub fn check_argon_cost(m: u32, t: u8) -> Result<(), String> {
+    if m > MAX_M_KIB {
+        return Err(format!("record asks for {m} KiB of Argon2 memory; refusing above {MAX_M_KIB}"));
+    }
+    if t > MAX_T {
+        return Err(format!("record asks for {t} Argon2 passes; refusing above {MAX_T}"));
+    }
+    if m < 8 || t < 1 {
+        return Err("record asks for Argon2 memory below 8 KiB or no passes".into());
+    }
+    Ok(())
+}
 
 pub fn unhex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
@@ -88,16 +107,21 @@ pub fn entropy_to_words(entropy: &[u8]) -> String {
 /// which step disagrees with vectors.json.
 pub fn derive_pad_a(passphrase: &str, header: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
     let m = u32::from_be_bytes(header[1..5].try_into().unwrap());
-    if m > MAX_M_KIB {
-        return Err(format!("record asks for {m} KiB of Argon2 memory; refusing above {MAX_M_KIB}"));
-    }
-    let params = Params::new(m, header[5] as u32, 1, Some(32)).map_err(|e| e.to_string())?;
+    let argon = argon2id(passphrase, m, header[5], &header[6..22])?;
+    Ok((argon, hkdf_pad(&argon, &[b"bk1/A".as_slice(), header].concat())))
+}
+
+/// Argon2id v1.3, parallelism 1, 32-byte output, over the NFKD form of the passphrase. Shared by v1 and
+/// v2; `m` comes from an untrusted record, hence the cap.
+pub(crate) fn argon2id(passphrase: &str, m: u32, t: u8, salt: &[u8]) -> Result<[u8; 32], String> {
+    check_argon_cost(m, t)?;
+    let params = Params::new(m, t as u32, 1, Some(32)).map_err(|e| e.to_string())?;
     let normalized: String = passphrase.nfkd().collect();
     let mut argon = [0u8; 32];
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(normalized.as_bytes(), &header[6..22], &mut argon)
+        .hash_password_into(normalized.as_bytes(), salt, &mut argon)
         .map_err(|e| e.to_string())?;
-    Ok((argon, hkdf_pad(&argon, &[b"bk1/A".as_slice(), header].concat())))
+    Ok(argon)
 }
 
 /// Pad B from the 32-byte secret of the second factor (the YubiKey's hmac-secret output).
