@@ -115,6 +115,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 /// (not before its prompts, where Ctrl-C should still just quit). Without it, these signals kill the
 /// process as usual.
 #[cfg(unix)]
+#[allow(unsafe_code)] // the workspace denies unsafe; this one libc call has a SAFETY note below
 pub fn catch_signals() {
     let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {

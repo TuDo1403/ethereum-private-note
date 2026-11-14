@@ -1,0 +1,41 @@
+# cargo-deny policy. CI runs `cargo deny check`; run it locally the same way.
+
+[advisories]
+# Known vulnerabilities and unmaintained or yanked crates fail the build. To accept one on purpose,
+# add `{ id = "RUSTSEC-...", reason = "..." }` to `ignore` with the reason.
+yanked = "deny"
+ignore = [
+    # crypto-bigint 0.5.5 is pulled in by alloy -> k256 -> elliptic-curve, which cap it below the
+    # fixed 0.7.6. Only `publish` is affected, and it signs with a throwaway gas key held in memory;
+    # no seed or share ever reaches that code. Remove once alloy moves to a k256 that allows >=0.7.6.
+    { id = "RUSTSEC-2026-0387", reason = "alloy signing path only; throwaway gas key, no wallet secret" },
+    # `paste` is an alloy proc-macro helper that runs at compile time only.
+    { id = "RUSTSEC-2024-0436", reason = "compile-time macro dependency of alloy" },
+]
+
+[licenses]
+# Permissive licences only: this is a wallet tool, so no copyleft surprises in the dependency tree.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# The workspace crates (`publish = false`) have no licence of their own yet; skip them here.
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicate versions are normal in a large tree (alloy), so they only warn.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other by path only.
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io (vendored in ./vendor); no git or alternate registries.
+unknown-registry = "deny"
+unknown-git = "deny"

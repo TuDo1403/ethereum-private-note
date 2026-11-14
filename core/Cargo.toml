@@ -4,6 +4,11 @@ version = "2.0.0"
 edition = "2024"
 rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum
 
+publish = false
+
+[lints]
+workspace = true
+
 [dependencies]
 aes-gcm = "=0.10.3"
 argon2 = "=0.5.3"

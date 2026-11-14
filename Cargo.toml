@@ -5,6 +5,24 @@ resolver = "3"
 # Every dependency is pinned exactly and vendored in ./vendor (see .cargo/config.toml), so this builds
 # offline years from now. `recover` must stay tiny: it is the tool you need in an emergency.
 
+# Lints for every crate (each opts in with `[lints] workspace = true`). CI runs clippy with
+# `-D warnings`, so a warning here fails the build; locally it only warns.
+[workspace.lints.rust]
+# The one exception is the signal handler in `publish`, which carries its own allow and SAFETY note.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+
 # The real-parameter vector needs 1 GiB Argon2id, which is far too slow unoptimised.
 [profile.test]
 opt-level = 3
+
+# Smaller, faster release binaries for the published artifacts.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
