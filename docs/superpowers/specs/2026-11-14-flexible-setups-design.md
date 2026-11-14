@@ -132,7 +132,10 @@ exactly the k-subsets, at most C(5,2) = 10, so everything is enumerated.
 
 Verdict:
 
-- weak if some single place holds a whole k-subset ("one break-in at <place> opens it: <labels>").
+- weak if some single place holds a whole k-subset ("one break-in at <place> opens it: <labels>"), or
+  if a whole k-subset is 1Password shares of one account, which counts as one place ("one breach of the
+  1Password account <account> opens it: <labels>"); the account is in the setup, so this applies with
+  places unknown too.
 - otherwise ok if some k-subset is papers only (they are spread over places, so a thief must find
   papers in two places).
 - strong if every k-subset needs a YubiKey.
@@ -183,8 +186,9 @@ Steps (numbered on screen, "step i of N", N depends on the setup):
    the setup and the place-free part of the scores (n - k loss, papers-only theft), with a note that
    places were checked in `vault plan`.
 2. Offline checklist (as today), listing what to have ready: every YubiKey, paper and pen.
-3. **Each YubiKey, one at a time**: "plug in only YubiKey B" (so `device_path` finds exactly one key unless
-   `--device` is given), then enroll a new credential or paste an existing credential id, then get its
+3. **Each YubiKey, one at a time**: "plug in only YubiKey B" (so `device_path` finds exactly one key;
+   `--device` names one path, so a setup with more than one YubiKey refuses it before the output
+   directory is made), then enroll a new credential or paste an existing credential id, then get its
    secret (PIN and touch). A missing key or wrong PIN fails here, before the seed is typed. Two shares
    must not use the same credential: refuse a repeated id. (Whether enrolment and secret share one PIN
    prompt is the builder's call.)
