@@ -152,12 +152,23 @@ pub fn parse(sheet: &str) -> Vec<SheetShare> {
     cred.into_iter().chain(op).collect()
 }
 
+/// The common Unicode format characters (category Cf) that hide or reorder text: zero width and direction
+/// marks, bidi embeddings and isolates, the byte order mark. Not every Cf code point; std has no category test.
+fn is_format(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
 /// `share <x>:  <kind>  "<label>"  <locator>`. The label sits between the first pair of quotes (labels
 /// hold none), and the locator follows it.
 fn parse_line(l: &str) -> Option<SheetShare> {
     let (x, rest) = l.strip_prefix("share ")?.split_once(':')?;
     let (kind, rest) = rest.trim_start().split_once(' ')?;
     let (label, tail) = rest.trim_start().strip_prefix('"')?.split_once('"')?;
+    // The label is printed in restore prompts: a control character (ESC, CR) could rewrite the screen around
+    // them, and a format character (bidi override, zero width) could disguise what is shown.
+    if label.chars().any(|c| c.is_control() || is_format(c)) {
+        return None;
+    }
     let tail = tail.trim();
     let locator = match kind {
         "passphrase" | "paper" => Locator::None,
@@ -297,7 +308,11 @@ mod tests {
             "share 2:  yubikey      \"x\"\n",                          // no credential
             "share 2:  laser        \"x\"\n",
             "share two:  paper      \"x\"\n",
-            "share 2:  paper        x\n", // no quotes
+            "share 2:  paper        x\n",              // no quotes
+            "share 2:  paper        \"a\x1b[2Jb\"\n",  // ESC
+            "share 2:  paper        \"a\rb\"\n",       // CR
+            "share 2:  paper        \"a\u{202E}b\"\n", // bidi override
+            "share 2:  paper        \"a\u{200B}b\"\n", // zero width space
         ] {
             assert!(parse(bad).is_empty(), "{bad:?}");
         }
