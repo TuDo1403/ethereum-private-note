@@ -142,6 +142,7 @@ On the **offline** machine, with the YubiKey plugged in:
 ```bash
 ./vault backup                  # or just ./vault and pick "Make a new backup"
 ./vault backup --device PATH    # when several FIDO2 keys are plugged in (see `fido2-token -L`)
+./vault backup --allow-unsafe-host   # only if you accept the host check's findings (see "The machine you use")
 ```
 
 `vault` refuses to run through a pipe; it needs a real terminal. Before asking for anything it creates
@@ -263,7 +264,7 @@ item in the 1Password app on another device and type its 24 words when `vault` a
 ### Guided: `vault restore`
 
 ```bash
-./vault restore [--device PATH]
+./vault restore [--device PATH] [--allow-unsafe-host]
 ```
 
 Pick **Verify only** (seed fingerprint, never the seed; the default) or **Restore** (shows the seed) with
@@ -282,7 +283,7 @@ the normal way to restore: every secret is read at a hidden prompt.
 not land in `ps`. Run it alone, then type one factor per line and end with Ctrl-D:
 
 ```bash
-./recover restore <record-hex> [--key X=CRED_ID]... [--device PATH]
+./recover restore <record-hex> [--key X=CRED_ID]... [--device PATH] [--allow-unsafe-host]
 ```
 
 ```
@@ -363,6 +364,28 @@ passphrase and the YubiKey.
 
 ### The machine you use
 
+No software here can beat a keylogger, a screen recorder or a kernel-level endpoint agent (CrowdStrike,
+SentinelOne, Carbon Black and the like): whoever owns the kernel sees every key you type, the screen and
+process memory. `vault` and `recover` therefore do two modest, heuristic things, and the rest is where you run them:
+
+- **Host check.** They refuse to start while a network interface is up (loopback and link-local do not
+  count) or a known monitoring agent is installed, and say which. `--allow-unsafe-host` continues anyway,
+  with the findings printed as a warning. The agent list is a few install paths: finding nothing proves
+  nothing. `vault op-store` is exempt (it is the online step and only types share 2).
+- **Process hardening.** No core dumps; other processes of the same user cannot attach a debugger or read
+  the process (Linux `PR_SET_DUMPABLE`, macOS `PT_DENY_ATTACH`); on Linux all memory is locked out of swap
+  when `RLIMIT_MEMLOCK` leaves room for Argon2's 1 GiB (run as root, or raise the limit). This stops crash
+  collectors and same-user malware, **not root, and not an agent running in the kernel**. A failed step
+  prints a warning.
+- **Best fix: a machine that is never online and has no agent**: a spare laptop or a Raspberry Pi 4/5 booted
+  from a read-only card, with no wifi. A managed work laptop is the wrong place for a seed.
+- **Treat a real restore as burning the seed.** Prefer *Verify only*. If a restore showed the seed on a
+  machine you do not fully trust, move the funds to a new seed afterwards.
+- **Keep half the secret off the computer** if you sign with a hardware wallet: create the seed on the
+  device and keep its own backup there, add a generated 12-word BIP39 passphrase (the "25th word") that you
+  enter on the device's own screen, and back up *only that passphrase* with `vault` (as if it were a seed).
+  A fully compromised computer then learns a passphrase that is useless without the device or its backup.
+  Check that your device accepts a passphrase that long on its screen before relying on this.
 - `vault` and `recover` need no network. Run backups and restores **offline**: the seed and secrets
   pass through memory and the screen.
 - `vault` wipes seed, passphrase and key material from its memory after use (`zeroize`, best effort:

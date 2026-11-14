@@ -30,7 +30,7 @@ proc words_of {block} {
 "#;
 
 const SCRIPT: &str = r#"
-spawn $env(VAULT) backup --device /dev/fake
+spawn $env(VAULT) --allow-unsafe-host backup --device /dev/fake
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 if {![file isdirectory $dir]} { fail "output folder not made before the start" }
@@ -67,7 +67,7 @@ expect "publish <rpc-url>"
 expect eof
 
 # Verify only: the papers open the record, the fingerprint is shown, the seed is not.
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -87,7 +87,7 @@ puts "\nDIR=$dir FP=$fp"
 /// then `vault op-store` (twice: the second run must find the item, not duplicate it), then a verify-only
 /// restore from the 1Password share and the paper share (no passphrase, so no Argon2 in the restore).
 const SCRIPT_1PASSWORD: &str = r#"
-spawn $env(VAULT) backup
+spawn $env(VAULT) --allow-unsafe-host backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 expect "offline and ready."; send "\r"
@@ -133,7 +133,7 @@ type_words $shareb
 expect "already in 1Password"
 expect eof
 
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -149,7 +149,7 @@ expect eof
 
 # A failing `op read` (locked, Touch ID cancelled) must not end the restore: it falls back to the paper.
 set env(FAKE_OP_READ_FAILS) 1
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"

@@ -2,11 +2,13 @@
 //! paper shares, hardware secrets) come from stdin, never from arguments, so none of them lands in `ps`
 //! or shell history. The record, credential ids and device path are public.
 
-use epn_core::{bip39::share_from_words, fido, record, unhex};
+use epn_core::{bip39::share_from_words, fido, host, record, unhex};
 use std::io::Read;
 
 const USAGE: &str = "usage:
-  recover restore <record-hex> [--key X=CRED_ID]... [--device PATH]  < factors
+  recover restore <record-hex> [--key X=CRED_ID]... [--device PATH] [--allow-unsafe-host]  < factors
+It refuses to run while a network interface is up or a monitoring agent is installed, unless
+--allow-unsafe-host is given: a keylogger sees every factor typed here.
 Run it alone and type the factors on stdin, then Ctrl-D; never put a factor inside a command line (shell
 history keeps it). --key reads the YubiKey that is share X (PIN and touch). stdin has one factor per
 line, in any order, blank lines ignored:
@@ -98,6 +100,11 @@ fn parse_factors(input: &str) -> Result<Factors<'_>, Fail> {
 // Deliberately never echoes the arguments: a misplaced secret would be printed.
 fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
     let device = flag(&mut args, "--device")?;
+    let allow_unsafe_host = args
+        .iter()
+        .position(|a| a == "--allow-unsafe-host")
+        .map(|i| args.remove(i))
+        .is_some();
     let mut keys = Vec::new();
     while let Some(k) = flag(&mut args, "--key")? {
         let (x, cred) = k
@@ -115,6 +122,8 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
         ));
     };
     let record = unhex(record_hex)?;
+    // Before stdin is read, so a refused run costs the user nothing they typed.
+    host::require_trusted_host(allow_unsafe_host)?;
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
@@ -147,6 +156,9 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
 }
 
 fn main() {
+    for w in host::harden() {
+        eprintln!("warning: {w}");
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = if args.is_empty() {
         String::new()
