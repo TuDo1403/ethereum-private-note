@@ -18,12 +18,8 @@ fn cli_path(args: &[&str], stdin: &str, path: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // Usage errors exit before reading stdin, so the write may hit a closed pipe; the exit status and stderr are what the tests assert on.
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
     child.wait_with_output().unwrap()
 }
 
