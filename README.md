@@ -1,13 +1,44 @@
+<div align="center">
+
 # Ethereum Private Note
 
-Back up a BIP39 wallet seed so that **any k of n factors** restore it, and **fewer than k reveal
-nothing**. The usual setup, and the one described below, is 2 of 3:
+**Back up a wallet seed so that any *k* of *n* factors restore it, and fewer than *k* reveal nothing.**
 
-| factor | what it is | where it lives |
-|--------|------------|----------------|
-| **passphrase** | 12 BIP39 words, generated for you (132 bits) | paper |
-| **YubiKey** | FIDO2 `hmac-secret` of a resident credential, unlocked by the key's PIN and a touch | the key |
-| **paper share** | 32 bytes written as 24 BIP39 words (looks like a seed, is not one) | paper |
+A public record, a passphrase, a YubiKey and a paper share. The record can sit on any EVM chain, in your
+email or on a printout: without enough factors it is noise.
+
+[![CI](https://github.com/TuDo1403/ethereum-private-note/actions/workflows/ci.yml/badge.svg)](https://github.com/TuDo1403/ethereum-private-note/actions/workflows/ci.yml)
+[![Audit](https://github.com/TuDo1403/ethereum-private-note/actions/workflows/audit.yml/badge.svg)](https://github.com/TuDo1403/ethereum-private-note/actions/workflows/audit.yml)
+[![Release](https://img.shields.io/github/v/release/TuDo1403/ethereum-private-note?display_name=tag)](https://github.com/TuDo1403/ethereum-private-note/releases)
+![Rust 1.100](https://img.shields.io/badge/rust-1.100-orange)
+![Not independently audited](https://img.shields.io/badge/security-not%20independently%20audited-red)
+
+[Quick start](#quick-start) ·
+[How it works](#how-it-works) ·
+[Install](#install) ·
+[Making a backup](#making-a-backup) ·
+[Restoring](#restoring) ·
+[Security](#security-considerations) ·
+[Limitations](#limitations)
+
+</div>
+
+> [!CAUTION]
+> **Status.** Personal tool, not independently audited. The `publish` step has been tested against a
+> local `anvil` chain only. Read [Limitations](#limitations) before trusting it with real funds.
+
+---
+
+## At a glance
+
+Any **k of n** factors restore the seed; **fewer than k reveal nothing**. The usual setup, and the one
+described below, is 2 of 3:
+
+| | factor | what it is | where it lives |
+|---|--------|------------|----------------|
+| 📝 | **passphrase** | 12 BIP39 words, generated for you (132 bits) | paper |
+| 🔐 | **YubiKey** | FIDO2 `hmac-secret` of a resident credential, unlocked by the key's PIN and a touch | the key |
+| 📄 | **paper share** | 32 bytes written as 24 BIP39 words (looks like a seed, is not one) | paper |
 
 The seed is encrypted with a random key, the key is split with Shamir, and the passphrase and YubiKey
 shares are masked with pads derived from the passphrase and the YubiKey. The result is a 152-byte
@@ -16,16 +47,49 @@ in the cloud. Without two factors it is noise.
 
 The format is k-of-n (2 <= k <= n <= 5; any number of hardware and paper shares, at most one passphrase share),
 and `vault` makes any setup it allows: you choose the shares and k, for example 2 of 4 with two YubiKeys, and
-`vault plan` scores the choice before you commit (see [Planning a setup](#planning-a-setup)). `SPEC.md` describes the format completely (enough to write a recovery tool in another
-language) and `vectors.json` fixes every intermediate value.
+`vault plan` scores the choice before you commit (see [Planning a setup](#planning-a-setup)).
+`SPEC.md` describes the format completely (enough to write a recovery tool in another language) and
+`vectors.json` fixes every intermediate value.
 
-> **Status.** Personal tool, not independently audited. The `publish` step has been tested against a
-> local `anvil` chain only. Read [Limitations](#limitations) before trusting it with real funds.
+### The life of a backup
+
+```mermaid
+flowchart LR
+    plan["<b>vault plan</b><br/>any machine, no secrets"]
+    backup["<b>vault backup</b><br/>offline machine"]
+    test["<b>vault restore</b><br/>verify only, offline"]
+    publish["<b>publish</b><br/>online machine, public data only"]
+    opstore["<b>vault op-store</b><br/>online, only with a 1Password share"]
+    keep(["record on chain<br/>and in several copies"])
+    restore["<b>vault restore</b> or <b>recover restore</b><br/>offline, any k factors"]
+
+    plan --> backup --> test
+    test --> publish --> keep
+    test -.-> opstore
+    keep -. "years later" .-> restore
+```
+
+## Quick start
+
+> [!TIP]
+> Read [Recommended setup](#recommended-setup) first: the machine you use and where you keep each factor
+> matter as much as the commands.
+
+```bash
+./vault plan                 # 1. design and score a setup (any machine, no secrets); writes setup.txt
+./vault backup setup.txt     # 2. OFFLINE machine: make the backup; writes record.hex and recovery-sheet.txt
+./vault restore              # 3. OFFLINE: pick "Verify only", try every combination of k shares
+./publish <rpc-url> record.hex <refund-address>   # 4. ONLINE machine: store the public record on chain
+./vault restore              # 5. when you need the seed: OFFLINE, any k factors
+```
+
+Install first: [prebuilt binaries](#prebuilt-binaries) or [from source](#from-source).
 
 ---
 
 ## Contents
 
+- [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [Repository layout](#repository-layout)
 - [Install](#install)
@@ -93,8 +157,11 @@ download, not a tampered release, because both files come from the same place. T
 the binaries from this repository, download the tarball and run
 `gh attestation verify epn-vX.Y.Z-<platform>.tar.gz --repo TuDo1403/ethereum-private-note`.
 If you would rather not pipe a script into a shell, download the tarball and `SHA256SUMS` from the
-release page and do the same checks by hand. For the machine that holds your backup, building from
-source (below) avoids trusting a prebuilt binary at all.
+release page and do the same checks by hand.
+
+> [!TIP]
+> For the machine that holds your backup, build from source (below): it avoids trusting a prebuilt
+> binary at all.
 
 ### From source
 
@@ -128,15 +195,19 @@ the offline machine you will use.
 - **A YubiKey 5 (or any FIDO2 key with `hmac-secret`) with a FIDO2 PIN set.** Set the PIN first, for
   example with `ykman fido access change-pin`. Without a PIN the key cannot be used.
   With more YubiKeys in the setup, you need one **physically different** key for each share.
-  **Or 1Password with Touch ID** instead of a YubiKey: that share is then kept as a 1Password item and
-  read back with Touch ID. Install the `op` command and turn on *Settings > Developer > Integrate with
-  1Password CLI* in the 1Password app. This is a weaker factor than a YubiKey: the share syncs with
-  your 1Password account and is as safe as that account, not tied to one device. Use a **personal**
-  account, never a work one (its admins can reach it, and you lose it with the job); `vault` asks for
-  the account explicitly and passes it to every `op` call. **Never keep the passphrase or the paper
-  share in that same account**, or one breach of it gives two factors. The `op` command needs
-  1Password's servers, so the offline backup never runs it: a 1Password share goes on a temporary paper and is
-  put into 1Password afterwards, on your online machine, with `vault op-store`.
+- **Or 1Password with Touch ID** instead of a YubiKey: that share is then kept as a 1Password item and
+  read back with Touch ID.
+  - Install the `op` command and turn on *Settings > Developer > Integrate with 1Password CLI* in the
+    1Password app.
+  - This is a weaker factor than a YubiKey: the share syncs with your 1Password account and is as safe as
+    that account, not tied to one device.
+  - Use a **personal** account, never a work one (its admins can reach it, and you lose it with the job);
+    `vault` asks for the account explicitly and passes it to every `op` call.
+  - **Never keep the passphrase or the paper share in that same account**, or one breach of it gives two
+    factors.
+  - The `op` command needs 1Password's servers, so the offline backup never runs it: a 1Password share
+    goes on a temporary paper and is put into 1Password afterwards, on your online machine, with
+    `vault op-store`.
 - **Paper and a pen** for the passphrase and the paper share. Steel plates if you want fire/water resistance.
 - **An online machine** for `publish` (later, no secrets involved).
 - **A wallet with a little ETH** on the chain you choose, to fund the throwaway publishing address.
@@ -346,9 +417,12 @@ The output must be `0x00` followed by the contents of `record.hex` (without its 
 
 ## Testing the backup
 
-**Do not trust a backup you have not restored.** On the offline machine, right after making it, run
-`vault restore`, pick **Verify only** (the first, default item), and restore with combinations of k shares
-until every share has been used at least once. For 2 of 3, that is for example:
+> [!IMPORTANT]
+> **Do not trust a backup you have not restored.**
+
+On the offline machine, right after making it, run `vault restore`, pick **Verify only** (the first,
+default item), and restore with combinations of k shares until every share has been used at least once.
+For 2 of 3, that is for example:
 
 1. passphrase + YubiKey
 2. passphrase + paper share
@@ -408,8 +482,11 @@ hw <X> <64 hex digits>   a hardware secret, instead of --key
 YubiKeys plugged in at once, give each key its own device as `--key X=CRED_ID@PATH` (`fido2-token -L`
 lists the paths); a key without `@PATH` uses `--device`, else the only key found. A 1Password share is
 typed as `paper X ...`. Every share has its number X on the recovery sheet, which also prints the exact
-command for the backup (with `@<path>` placeholders when it has several YubiKeys). Input is visible on screen, so mind the screen, but it never reaches shell history. **Never type
-a factor into the command line itself**: your shell saves the whole line in its history file.
+command for the backup (with `@<path>` placeholders when it has several YubiKeys). Input is visible on
+screen, so mind the screen, but it never reaches shell history.
+
+> [!WARNING]
+> **Never type a factor into the command line itself**: your shell saves the whole line in its history file.
 
 The seed words go to stdout, the shares used to stderr. Exit code 0 is success, 1 is a failed restore,
 2 is a usage error. Errors never echo what you typed; a bad word is reported by its position or line.
@@ -456,10 +533,12 @@ replace it with something you chose, and do not shorten it.
 
 ### A leaked factor cannot be revoked
 
-The on-chain record is write-once and can never be deleted, and copies may exist anywhere. If any
-single factor is exposed (paper photographed, YubiKey stolen together with its PIN, paper share seen),
-making a new backup does **not** help, because the old record stays attackable with that factor.
-**Move the funds to a new seed**, then back up the new seed.
+The on-chain record is write-once and can never be deleted, and copies may exist anywhere.
+
+> [!WARNING]
+> If any single factor is exposed (paper photographed, YubiKey stolen together with its PIN, paper share
+> seen), making a new backup does **not** help, because the old record stays attackable with that factor.
+> **Move the funds to a new seed**, then back up the new seed.
 
 ### YubiKey
 
