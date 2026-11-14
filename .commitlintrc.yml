@@ -2,6 +2,9 @@
 extends:
   - "@commitlint/config-conventional"
 rules:
+  # Wrapping is a style choice and trips on URLs and pasted output, so do not enforce it.
+  body-max-line-length: [0]
+  footer-max-line-length: [0]
   # Scope is optional, but when given it must be one of these.
   scope-enum:
     - 2
