@@ -215,6 +215,8 @@ fn http_client(url: &str) -> Result<RpcClient, String> {
     let url = Url::parse(url).map_err(e("bad RPC URL"))?;
     let http = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        // A 307/308 would re-send the signed transaction to whatever host the RPC names.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(e("HTTP client"))?;
     Ok(RpcClient::new_http_with_client(http, url))
@@ -291,46 +293,57 @@ async fn run(
     let reader = ProviderBuilder::new()
         .connect_client(http_client(opts.verify_rpc_url.unwrap_or(opts.rpc_url))?);
 
-    let chain_id = provider.get_chain_id().await.map_err(e("chain id"))?;
-    if chain_id == 0 {
-        return Err("RPC reported chain id 0".into());
-    }
-    if reader
-        .get_chain_id()
-        .await
-        .map_err(e("verify RPC chain id"))?
-        != chain_id
-    {
-        return Err("verify RPC is on a different chain".into());
-    }
-    log!("chain id {chain_id}");
-
-    // The record's address is fixed by the sender and nonce 0. Only this process holds the key and the
-    // deploy is the first tx it sends, so the only other tx that can ever take nonce 0 is our own sweep
-    // replacing a stuck deploy; then nothing is stored at `address`, which the end of `run` re-checks.
-    let address = sender.create(0);
-
-    // A sweep to an address with code runs that code and can exceed the fixed 21000 gas: refuse early.
+    // Nothing is at stake before the funding address is shown, so Ctrl-C may simply abandon this: without
+    // the race, a stalled RPC would hold the process (and its signal handler) for 20 s per call.
     let refund = opts.refund;
-    if [Address::ZERO, sender].contains(&refund) {
-        return Err("refund address must be your own plain account, not zero or the sender".into());
-    }
-    if !provider
-        .get_code_at(refund)
-        .await
-        .map_err(e("get code"))?
-        .is_empty()
-    {
-        return Err("refund address has code (contract or delegated account); the sweep could fail, use a plain account".into());
-    }
+    let preflight = async {
+        let chain_id = provider.get_chain_id().await.map_err(e("chain id"))?;
+        if chain_id == 0 {
+            return Err("RPC reported chain id 0".into());
+        }
+        if reader
+            .get_chain_id()
+            .await
+            .map_err(e("verify RPC chain id"))?
+            != chain_id
+        {
+            return Err("verify RPC is on a different chain".into());
+        }
+        log!("chain id {chain_id}");
 
-    // The estimate is made once (an unfunded `from` is fine: no gas price is set on the request).
-    let deploy_tx = TransactionRequest::default().with_deploy_code(deploy_code(record));
-    let deploy_gas = provider
-        .estimate_gas(deploy_tx.clone().with_from(sender))
-        .await
-        .map_err(e("deploy gas estimate"))?;
-    let deploy_gas = deploy_gas.saturating_mul(GAS_MARGIN_PCT) / 100;
+        // The record's address is fixed by the sender and nonce 0. Only this process holds the key and the
+        // deploy is the first tx it sends, so the only other tx that can ever take nonce 0 is our own sweep
+        // replacing a stuck deploy; then nothing is stored at `address`, which the end of `run` re-checks.
+        let address = sender.create(0);
+
+        // A sweep to an address with code runs that code and can exceed the fixed 21000 gas: refuse early.
+        if [Address::ZERO, sender].contains(&refund) {
+            return Err(
+                "refund address must be your own plain account, not zero or the sender".into(),
+            );
+        }
+        if !provider
+            .get_code_at(refund)
+            .await
+            .map_err(e("get code"))?
+            .is_empty()
+        {
+            return Err("refund address has code (contract or delegated account); the sweep could fail, use a plain account".into());
+        }
+
+        // The estimate is made once (an unfunded `from` is fine: no gas price is set on the request).
+        let deploy_tx = TransactionRequest::default().with_deploy_code(deploy_code(record));
+        let deploy_gas = provider
+            .estimate_gas(deploy_tx.clone().with_from(sender))
+            .await
+            .map_err(e("deploy gas estimate"))?;
+        let deploy_gas = deploy_gas.saturating_mul(GAS_MARGIN_PCT) / 100;
+        Ok::<_, String>((chain_id, address, deploy_tx, deploy_gas))
+    };
+    let (chain_id, address, deploy_tx, deploy_gas) = tokio::select! {
+        r = preflight => r?,
+        () = interrupted() => return Err("interrupted before anything was funded".into()),
+    };
     let gas_total = deploy_gas + SWEEP_GAS;
 
     let rescue = Rescue {
@@ -435,13 +448,20 @@ async fn run(
     // A signal that arrived just as the work finished is already handled by sweeping now; only a
     // new one may abandon the sweep.
     INTERRUPTED.store(false, Ordering::SeqCst);
-    let swept = tokio::select! {
-        r = sweep(&provider, sender, refund, sent.get().unwrap_or((0, 0)), opts.allow_high_fees, secrets) => r,
-        () = interrupted() => Err("interrupted again during the sweep".to_string()),
+    // Nothing can be at `sender` before its address was shown, so an earlier failure sweeps nothing.
+    let swept = if rescue.armed.get() {
+        tokio::select! {
+            r = sweep(&provider, sender, refund, sent.get().unwrap_or((0, 0)), opts.allow_high_fees, secrets) => r,
+            () = interrupted() => Err("interrupted again during the sweep".to_string()),
+        }
+    } else {
+        Ok(U256::ZERO)
     };
     // Once the funds have arrived and the sweep has finished, nothing more is expected at `sender` and
     // the key may be forgotten. In every other case `rescue` prints it when this function returns.
-    if funded.get() && swept.is_ok() {
+    // A zero balance after funding is no proof of a finished sweep (a lagging or lying RPC can say so):
+    // only a sweep that sent something lets the key go.
+    if funded.get() && swept.as_ref().is_ok_and(|v| !v.is_zero()) {
         rescue.armed.set(false);
     }
 
@@ -624,7 +644,8 @@ async fn read_back(reader: &impl Provider, address: Address, record: &[u8]) -> R
 fn bump((max_fee, tip): (u128, u128)) -> (u128, u128) {
     (
         max_fee.saturating_add(max_fee.div_ceil(8)),
-        tip.saturating_add(tip.div_ceil(8)),
+        // At least +1: a tip of 0 must still rise, or a pool refuses the replacement of a tip-0 deploy.
+        tip.saturating_add(tip.div_ceil(8).max(1)),
     )
 }
 
@@ -868,8 +889,8 @@ mod tests {
     #[test]
     fn bump_is_at_least_12_5_percent() {
         assert_eq!(bump((800, 80)), (900, 90));
-        assert_eq!(bump((1, 0)), (2, 0)); // rounded up
-        assert_eq!(bump((0, 0)), (0, 0));
+        assert_eq!(bump((1, 1)), (2, 2)); // rounded up
+        assert_eq!(bump((0, 0)), (0, 1)); // a zero tip still rises
     }
 
     /// A well-formed 2-of-2 record (passphrase and paper): 26 header bytes, 1 masked share, nonce, ciphertext.

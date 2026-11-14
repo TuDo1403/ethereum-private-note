@@ -72,6 +72,21 @@ fn read_from_1password(x: u8, r: &onepassword::SheetRef) -> Result<bool, String>
     ))
 }
 
+/// Share `x` from 1Password when the sheet names it and the person agrees, else typed from paper. A failed
+/// read (locked, Touch ID cancelled, offline) falls back to typing: a restore is done under stress and must
+/// not end here after the YubiKey PIN and touch.
+fn paper_share(x: u8, r: Option<&onepassword::SheetRef>) -> Result<Zeroizing<String>, String> {
+    if let Some(r) = r
+        && read_from_1password(x, r)?
+    {
+        match onepassword::read(&r.account, &r.reference) {
+            Ok(words) => return Ok(words),
+            Err(e) => println!("{e}\nType the 24 words from the paper instead."),
+        }
+    }
+    enter_paper_share(x)
+}
+
 pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     clear();
     println!(
@@ -146,12 +161,9 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     for attempt in 1..=TRIES {
         for &x in &redo {
             println!();
-            let secret = match (kind(x), op_ref(x)) {
-                (Kind::Passphrase, _) => ask_hidden("passphrase, exactly as written (hidden): ")?,
-                (_, Some(r)) if read_from_1password(x, r)? => {
-                    onepassword::read(&r.account, &r.reference)?
-                }
-                _ => enter_paper_share(x)?,
+            let secret = match kind(x) {
+                Kind::Passphrase => ask_hidden("passphrase, exactly as written (hidden): ")?,
+                _ => paper_share(x, op_ref(x))?,
             };
             typed.insert(x, secret);
         }
@@ -177,6 +189,13 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
                 if verify_only {
                     let entropy = Zeroizing::new(words_to_entropy(&words)?);
                     println!("\nVerified: shares {used:?} open the record.");
+                    // Any pair opens the record, so a wrong share among three would pass unnoticed.
+                    let unused: Vec<_> = held.iter().filter(|x| !used.contains(x)).collect();
+                    if !unused.is_empty() {
+                        println!(
+                            "Not proven: shares {unused:?} were not needed. Test them in another run."
+                        );
+                    }
                     println!("Seed fingerprint: {}", seed_fingerprint(&entropy));
                     println!(
                         "It must match the fingerprint on your recovery sheet (and the one shown at backup)."

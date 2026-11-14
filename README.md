@@ -65,7 +65,7 @@ record.
 | path | what |
 |------|------|
 | `core/` (`epn-core`) | the format: Argon2id, HKDF, GF(2^8) Shamir, AES-GCM, BIP39 words, FIDO2 via libfido2 |
-| `vault/` (`vault`) | interactive wizard: **backup** and guided **restore** |
+| `vault/` (`vault`) | interactive wizard: **backup**, guided **restore**, and **op-store** (puts share 2 into 1Password) |
 | `recover/` (`recover`) | small, scriptable **restore-only** tool; the one to keep for emergencies |
 | `publish/` (`publish`) | online step: deploys the record as contract code from a throwaway gas key ([details](publish/README.md)) |
 | `SPEC.md`, `vectors.json` | the backup format, and fixed test vectors for it |
@@ -192,7 +192,9 @@ Only with the 1Password option, after the papers are tested (see *Testing the ba
 
 It reads the account and item name from the sheet (public), asks for share 2 from the temporary paper,
 twice, and stores it (through stdin, never the command line or a file); 1Password asks for Touch ID.
-It then reads the item back and compares. Running it again finds the item instead of making a
+Before storing it checks that the item does not exist yet; that check fails when the item is missing, but
+also when 1Password is locked or offline, so it asks you to confirm in the 1Password app that the item is
+absent. It then reads the item back and compares. Running it again finds the item instead of making a
 duplicate. Then **destroy the temporary paper** (shred or burn it). Only share 2 is ever typed on this
 machine.
 
@@ -266,9 +268,12 @@ item in the 1Password app on another device and type its 24 words when `vault` a
 
 Pick **Verify only** (seed fingerprint, never the seed; the default) or **Restore** (shows the seed) with
 the arrow keys and Enter. Paste the record
-hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the credential id).
-Say which factors you have; the YubiKey is asked first so a missing key or wrong PIN fails before you
-type anything. The paper share is entered word by word, the passphrase hidden. Three attempts. This is
+hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the YubiKey credential
+id, or the 1Password item of share 2). Say which factors you have; the YubiKey is asked first so a
+missing key or wrong PIN fails before you type anything. A share kept in 1Password is offered from
+1Password (Touch ID); if that read fails, you are asked to type the paper instead. The paper share is
+entered word by word, the passphrase hidden. Three attempts. Verify only also lists any share you
+held that was not needed, since any pair opens the record: test such a share in another run. This is
 the normal way to restore: every secret is read at a hidden prompt.
 
 ### Scripted: `recover restore`
@@ -287,8 +292,8 @@ hw <X> <64 hex digits>   a hardware secret, instead of --key
 ```
 
 `--key X=CRED_ID` asks the YubiKey that is share X for its secret (PIN and touch). For a backup made by
-`vault`, the YubiKey is share 2 and the paper share is share 3; the recovery sheet prints the exact
-command. Input is visible on screen, so mind the screen, but it never reaches shell history. **Never type
+`vault`, the YubiKey (or the 1Password share, typed as `paper 2 ...`) is share 2 and the paper share is
+share 3; the recovery sheet prints the exact command. Input is visible on screen, so mind the screen, but it never reaches shell history. **Never type
 a factor into the command line itself**: your shell saves the whole line in its history file.
 
 The seed words go to stdout, the shares used to stderr. Exit code 0 is success, 1 is a failed restore,

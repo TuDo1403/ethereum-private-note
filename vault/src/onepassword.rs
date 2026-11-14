@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 /// The share number `vault` gives the 1Password factor (the YubiKey's place in the 2-of-3 layout).
 pub const X: u8 = 2;
 /// The recovery-sheet line that names the item; `vault restore` reads it back from there.
-pub const SHEET_PREFIX: &str = "1password:";
+const SHEET_PREFIX: &str = "1password:";
 
 fn run(args: &[&str], input: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let mut child = Command::new("op")
@@ -128,10 +128,7 @@ pub fn store(account: &str, vault: &str, title: &str, words: &str) -> Result<Str
 /// Reads a share back from its `op://` reference. 1Password asks for Touch ID (or its password) here.
 pub fn read(account: &str, reference: &str) -> Result<Zeroizing<String>, String> {
     check_account(account)?;
-    let ok = reference.starts_with("op://") && reference.chars().all(|c| !c.is_control());
-    if !ok {
-        return Err("not a 1Password reference (op://vault/item/field)".into());
-    }
+    split_reference(reference)?;
     let out = run(
         &["read", "--account", account, "--no-newline", reference],
         "",
@@ -165,6 +162,9 @@ pub fn sheet_references(sheet: &str) -> Vec<SheetRef> {
             let (x, rest) = rest.split_once(' ')?;
             let (reference, after) = rest.rsplit_once(" account ")?;
             let account = after.split_whitespace().next()?;
+            // A sheet is a plain file that gets copied around: nothing odd from it reaches `op`.
+            split_reference(reference).ok()?;
+            check_account(account).ok()?;
             Some(SheetRef {
                 x: x.parse().ok()?,
                 reference: reference.to_string(),
@@ -227,6 +227,13 @@ mod tests {
         );
         // A line without its account is not trusted: restore then asks rather than letting op guess.
         assert!(sheet_references("1password: share 2 op://Personal/x/password\n").is_empty());
+        // Nor is a line whose account or reference would not pass the checks made at backup.
+        for bad in [
+            "1password: share 2 op://Personal/x/password account a;b\n",
+            "1password: share 2 op://Personal/x\"/password account me@x.com\n",
+        ] {
+            assert!(sheet_references(bad).is_empty(), "{bad:?}");
+        }
         for bad in ["", "my 1password", "a;b"] {
             assert!(check_account(bad).is_err(), "{bad:?}");
         }

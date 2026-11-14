@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const PASS_X: u8 = 1;
-pub const KEY_X: u8 = 2;
+const KEY_X: u8 = onepassword::X; // the YubiKey and the 1Password share are alternatives at x = 2
 const PAPER_X: u8 = 3;
 
 /// The second factor: a YubiKey (its credential id) or 1Password (the account and vault share 2 goes into).
@@ -214,7 +214,7 @@ fn build_record(
     // One factor per share (pad or paper share), three in all: every pair must open the record.
     let all: Shares = Zeroizing::new([pads.as_slice(), paper.as_slice()].concat());
     for (i, j) in [(0, 1), (0, 2), (1, 2)] {
-        if unseal(&record, &[all[i], all[j]])?.0 != entropy {
+        if *Zeroizing::new(unseal(&record, &[all[i], all[j]])?.0) != entropy {
             return Err("self-check failed: nothing was saved, do not use this backup".into());
         }
     }
@@ -265,6 +265,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
             println!("credential id: {new}\n(it is saved on the recovery sheet; it is not secret)");
             new
         } else {
+            fido::check_cred_id(&id)?; // a typo is found now, not after the seed and the papers
             id
         })
     } else {
@@ -456,26 +457,41 @@ pub fn op_store(sheet_path: &str) -> Result<(), String> {
     // A second run (say, after a failed read-back) must not make a duplicate: `op read` refuses a
     // reference that matches two items, which would break the restore.
     println!(
-        "\nChecking that the item does not exist yet (1Password may ask for Touch ID, and `op` may report it is not found)."
+        "\nChecking that the item does not exist yet (1Password may ask for Touch ID; a message that it is not found is expected)."
     );
-    if let Ok(existing) = onepassword::read(&r.account, &r.reference) {
-        if *existing == *words {
+    match onepassword::read(&r.account, &r.reference) {
+        Ok(existing) if *existing == *words => {
             println!(
                 "Share {x} is already in 1Password as {} (checked). Now destroy the temporary share-{x} paper.",
                 r.reference
             );
             return Ok(());
         }
-        return Err(format!(
-            "1Password already has an item \"{title}\" holding other words: nothing was stored. Check the paper before touching that item."
-        ));
+        Ok(_) => {
+            return Err(format!(
+                "1Password already has an item \"{title}\" holding other words: nothing was stored. Check the paper before touching that item."
+            ));
+        }
+        // A failed read does not prove the item is absent (1Password locked, Touch ID cancelled, offline).
+        // A second item with the same title would make `op read` refuse the reference, so a person confirms.
+        Err(e) => {
+            println!("{e}");
+            if !yes(&format!(
+                "Does the 1Password app show NO item \"{title}\" in vault \"{vault}\"? (no stops here)"
+            ))? {
+                return Err("nothing was stored".into());
+            }
+        }
     }
 
     println!("Storing share {x}. 1Password may ask for Touch ID.");
     let reference = onepassword::store(&r.account, vault, title, &words)?;
     // Read back through the same path a restore uses: a wrong vault, a sync problem or a template
     // 1Password does not accept is caught now and not on the day the share is needed.
-    if *onepassword::read(&r.account, &reference)? != *words {
+    let back = onepassword::read(&r.account, &reference).map_err(|e| {
+        format!("{e}\nThe item \"{title}\" may now exist: check vault \"{vault}\" and delete it before running this again.")
+    })?;
+    if *back != *words {
         return Err(format!(
             "the item read back is not the share typed: delete the item \"{title}\" and run this again"
         ));

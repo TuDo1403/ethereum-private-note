@@ -1,5 +1,6 @@
 //! `vault`: the guided backup and restore. Backup walks through the offline half step by step; restore asks
-//! which factors you have and walks through each.
+//! which factors you have and walks through each; `op-store` is the online step that puts share 2 into
+//! 1Password.
 //!
 //! Secrets (seed, passphrase, paper share, YubiKey secret) live in memory only, wrapped in `Zeroizing`
 //! where the type allows. That is best effort: copies made by the format crate's helpers are not wiped. The

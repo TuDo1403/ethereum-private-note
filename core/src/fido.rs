@@ -133,10 +133,17 @@ fn parse_assert(out: &str) -> Result<[u8; 32], String> {
     Ok(secret)
 }
 
+/// The id is pasted into the tool's line-based input, so it must be plain base64 (no newline smuggling).
+/// Callers check it early: before a PIN is asked for, and at the start of a backup.
+pub fn check_cred_id(cred_id: &str) -> Result<(), String> {
+    Base64::decode_vec(cred_id)
+        .map(drop)
+        .map_err(|_| "credential id is not valid base64".to_string())
+}
+
 /// The key's 32-byte hmac-secret for this credential: PIN and touch required.
 pub fn secret(cred_id: &str, device: Option<&str>) -> Result<[u8; 32], String> {
-    // The id is pasted into the tool's line-based input, so it must be plain base64 (no newline smuggling).
-    Base64::decode_vec(cred_id).map_err(|_| "credential id is not valid base64".to_string())?;
+    check_cred_id(cred_id)?;
     let dev = device_path(device)?;
     let input = format!(
         "{}\n{RP_ID}\n{cred_id}\n{}\n",

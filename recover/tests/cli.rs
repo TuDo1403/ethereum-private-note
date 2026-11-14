@@ -232,6 +232,13 @@ fn yubikey_output_is_parsed_strictly() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), f("mnemonic"));
     std::fs::remove_dir_all(dir).unwrap();
+    // A bad credential id is refused before the YubiKey is asked for its PIN.
+    let out = cli(&["restore", f("record"), "--key", "2=@@bad"], &stdin);
+    let err = stderr(&out);
+    assert!(
+        out.status.code() == Some(1) && err.contains("base64") && !err.contains("PIN"),
+        "{err}"
+    );
     // The audit case: only the client data hash (32 zero bytes) printed. It must not become the hardware secret.
     for (name, body) in [
         ("one-line", "read h; echo \"$h\"".to_string()),
