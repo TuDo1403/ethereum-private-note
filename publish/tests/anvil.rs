@@ -6,7 +6,8 @@ use alloy::{
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
 };
-use epn_publish::{FundRequest, Options, V1_LEN, publish as run, record_id};
+use epn_core::record_id;
+use epn_publish::{FundRequest, Options, publish as run};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -107,13 +108,17 @@ async fn spike_base_fee(url: &str, wei: u128) {
     mine(url).await;
 }
 
-/// A valid v1 record (version 0x01, m = 1024 KiB, t = 3), distinct per seed.
+/// A valid 2-of-3 record (version 2: passphrase, YubiKey, paper; m = 1024 KiB, t = 3), distinct per seed.
 fn record(seed: u8) -> Vec<u8> {
-    (0..V1_LEN).map(|i| [1, 0, 0, 4, 0, 3].get(i).copied().unwrap_or(seed.wrapping_add(i as u8))).collect()
+    let mut r = vec![2, 0, 0, 4, 0, 3];
+    r.extend([0; 16]); // salt
+    r.extend([2, 3, 1, 2, 3]); // k, n, kinds
+    r.extend((r.len()..152).map(|i| seed.wrapping_add(i as u8)));
+    r
 }
 
-/// The largest v2 record SPEC.md allows: 3-of-5, all five shares on chain (passphrase + 4 hardware).
-fn largest_v2_record() -> Vec<u8> {
+/// The largest record SPEC.md allows: 3-of-5, all five shares on chain (passphrase + 4 hardware).
+fn largest_record() -> Vec<u8> {
     let mut r = vec![0x02, 0, 0x10, 0, 0, 3];
     r.resize(22, 0x5a); // salt
     r.extend([3, 5, 1, 2, 2, 2, 2]);
@@ -157,9 +162,9 @@ async fn deploys_record_as_code_reads_back_and_sweeps() {
 
 /// The largest record (250 bytes, code 251 bytes) deploys within the estimated gas.
 #[tokio::test(flavor = "multi_thread")]
-async fn largest_v2_record_deploys() {
+async fn largest_record_deploys() {
     let Some(anvil) = start_anvil().await else { return };
-    let rec = largest_v2_record();
+    let rec = largest_record();
     assert_eq!(rec.len(), 250);
     let out = run_funded(&anvil.1, &rec).await.unwrap();
     let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
@@ -169,7 +174,7 @@ async fn largest_v2_record_deploys() {
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_record_is_refused_before_funding() {
     let o = opts("http://127.0.0.1:1");
-    let err = run(&o, &[0u8; V1_LEN], |_: &FundRequest| panic!("must not ask for funds")).await.unwrap_err();
+    let err = run(&o, &[0u8; 152], |_: &FundRequest| panic!("must not ask for funds")).await.unwrap_err();
     assert!(err.contains("version 0"), "{err}");
 }
 

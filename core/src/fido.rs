@@ -1,4 +1,4 @@
-//! Factor B from a YubiKey, with no browser: the key's FIDO2 hmac-secret, driven through libfido2's
+//! The hardware secret from a YubiKey, with no browser: the key's FIDO2 hmac-secret, driven through libfido2's
 //! command-line tools (`fido2-token`, `fido2-cred`, `fido2-assert`). The PIN prompt and the touch happen
 //! inside those tools on the tty, so this process never sees the PIN. The only secret it handles is the
 //! 32-byte hmac-secret output, and only in memory.
@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 const RP_ID: &str = "localhost";
 
 /// The hmac-secret salt a browser derives for WebAuthn PRF input "bk1": SHA-256("WebAuthn PRF" || 0x00 || "bk1").
-/// Using the same derivation keeps factor B defined the same way whichever tool asks the key.
+/// Using the same derivation keeps the hardware factor defined the same way whichever tool asks the key.
 fn salt() -> [u8; 32] {
     Sha256::digest(b"WebAuthn PRF\0bk1").into()
 }
@@ -114,7 +114,7 @@ pub fn secret(cred_id: &str, device: Option<&str>) -> Result<[u8; 32], String> {
     let dev = device_path(device)?;
     let input = format!("{}\n{RP_ID}\n{cred_id}\n{}\n", client_data_hash(), Base64::encode_string(&salt()));
     // -v: user verification (PIN). Required, not optional: CTAP2 hmac-secret keeps separate secrets for
-    // assertions with and without UV, so dropping -v would silently give a different factor B.
+    // assertions with and without UV, so dropping -v would silently give a different secret.
     let out = run("fido2-assert", &["-G", "-h", "-v", "-p", &dev], &input)?;
     parse_assert(&out)
 }
@@ -136,7 +136,7 @@ mod tests {
         let (hash, auth, sig, secret) = (client_data_hash(), b64(&[1; 37]), b64(&[2; 70]), b64(&[7; 32]));
         let good = [hash.as_str(), RP_ID, &auth, &sig, &secret];
         assert_eq!(parse_assert(&assert_out(&good)).unwrap(), [7; 32]);
-        // The audit case: one line, the client data hash (32 zero bytes), must not become factor B.
+        // The audit case: one line, the client data hash (32 zero bytes), must not become the hardware secret.
         assert!(parse_assert(&assert_out(&[&hash])).is_err());
         assert!(parse_assert("").is_err());
         // Wrong line count, wrong hash, wrong rp id, missing pieces, wrong secret length, all-zero secret.

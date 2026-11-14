@@ -1,4 +1,4 @@
-//! Publish a record (format v1 or v2, see SPEC.md) as the runtime code of a new contract ("code as data"),
+//! Publish a record (see SPEC.md) as the runtime code of a new contract ("code as data"),
 //! paying gas from a throwaway key that exists only in memory. Flow: check chain -> wait for the throwaway
 //! address to be funded -> deploy (the record becomes the code at `sender.create(0)`) -> read the code back
 //! -> sweep leftovers.
@@ -11,7 +11,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
     transports::http::reqwest::Url,
 };
-use sha2::{Digest, Sha256};
+use epn_core::{record::parse_record as check_record, record_id};
 use std::cell::Cell;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,9 +22,6 @@ use std::time::{Duration, Instant};
 macro_rules! log {
     ($($t:tt)*) => {{ let _ = writeln!(std::io::stderr(), $($t)*); }};
 }
-
-/// Record format v1 size (see SPEC.md).
-pub const V1_LEN: usize = 147;
 
 const SWEEP_GAS: u64 = 21_000;
 /// Gas limits are the node's estimate plus 20 %.
@@ -57,71 +54,15 @@ pub fn parse_address(text: &str) -> Result<Address, String> {
     parsed.map_err(|e| format!("bad address: {e}"))
 }
 
-/// Parse a `record.hex` file: `0x` + the record's hex digits (surrounding whitespace allowed).
+/// Parse a `record.hex` file: `0x` + the record's hex digits (surrounding whitespace allowed). The record
+/// must be well-formed before a single wei is spent: it is permanent, and one that `recover` refuses would
+/// be useless forever. A record is at most 250 bytes (24 fixed header + 5 kinds + 5 x 32 masked shares + 12 nonce + 49 ciphertext), so its code (251 bytes with the 0x00
+/// prefix) is far below the EIP-170 limit of 24576 bytes.
 pub fn parse_record(text: &str) -> Result<Vec<u8>, String> {
     let body = text.trim().strip_prefix("0x").ok_or("record must start with 0x")?;
     let bytes = alloy::hex::decode(body).map_err(|e| format!("record is not hex: {e}"))?;
     check_record(&bytes)?;
     Ok(bytes)
-}
-
-/// Refuse anything that is not a well-formed record before a single wei is spent (the record is permanent,
-/// and one that `recover` refuses would be useless forever). Only the header rules of SPEC.md are checked,
-/// kept here on purpose so `publish` does not depend on the format crate:
-/// - both: Argon2 cost m (bytes 1..5) in 8..=2^21 KiB and t (byte 5) in 1..=16.
-/// - v1: byte 0 = 0x01, exactly 147 bytes.
-/// - v2: byte 0 = 0x02, k = byte 22, n = byte 23 with 2 <= k <= n <= 5, kind bytes 24..24+n each 01
-///   (passphrase, at most one), 02 (hardware) or 03 (paper), and exactly 85 + n + 32*c bytes, where c
-///   counts the on-chain kinds (01, 02); paper shares are not in the record.
-///
-/// So a record is at most 85 + 5 + 160 = 250 bytes: its code (251 bytes with the 0x00 prefix) is far
-/// below the EIP-170 limit of 24576 bytes.
-pub fn check_record(r: &[u8]) -> Result<(), String> {
-    match r.first() {
-        Some(1 | 2) => {}
-        Some(v) => return Err(format!("unknown record version {v} (expected 1 or 2)")),
-        None => return Err("record is empty".into()),
-    }
-    if let Some(cost) = r.get(1..6) {
-        let (m, t) = (u32::from_be_bytes([cost[0], cost[1], cost[2], cost[3]]), cost[4]);
-        if !(8..=1 << 21).contains(&m) || !(1..=16).contains(&t) {
-            return Err(format!("record asks for Argon2 m = {m} KiB, t = {t}; SPEC.md allows m 8..=2^21, t 1..=16"));
-        }
-    }
-    match r.first() {
-        Some(1) if r.len() == V1_LEN => Ok(()),
-        Some(1) => Err(format!("v1 record is {} bytes, expected {V1_LEN}", r.len())),
-        Some(2) => {
-            let short = || format!("v2 record is too short ({} bytes)", r.len());
-            let (k, n) = match (r.get(22), r.get(23)) {
-                (Some(&k), Some(&n)) => (k as usize, n as usize),
-                _ => return Err(short()),
-            };
-            if !(2..=5).contains(&n) || !(2..=n).contains(&k) {
-                return Err(format!("v2 record has k = {k}, n = {n}; SPEC.md needs 2 <= k <= n <= 5"));
-            }
-            let kinds = r.get(24..24 + n).ok_or_else(short)?;
-            if kinds.iter().any(|kind| !(1..=3).contains(kind)) {
-                return Err("v2 record has an unknown share kind".into());
-            }
-            if kinds.iter().filter(|&&kind| kind == 1).count() > 1 {
-                return Err("v2 record has more than one passphrase share".into());
-            }
-            let on_chain = kinds.iter().filter(|&&kind| kind != 3).count();
-            let want = 85 + n + 32 * on_chain;
-            if r.len() != want {
-                return Err(format!("v2 record is {} bytes, its header says {want}", r.len()));
-            }
-            Ok(())
-        }
-        _ => unreachable!("version checked above"),
-    }
-}
-
-/// First 8 bytes of SHA-256 over the record bytes, in hex: the record id that the recovery sheet carries
-/// too (SPEC.md, "Short identifiers"), so a run can be matched to its backup.
-pub fn record_id(record: &[u8]) -> String {
-    alloy::hex::encode(&Sha256::digest(record)[..8])
 }
 
 /// "0.0012 ETH (1200000000000000 wei)".
@@ -135,7 +76,7 @@ pub fn amount(wei: U256) -> String {
 /// executing and, more importantly, keeps the code from starting with 0xEF, which EIP-3541 rejects: without
 /// it about 1 in 256 random records would fail to deploy.
 fn deploy_code(record: &[u8]) -> Vec<u8> {
-    let len = u16::try_from(record.len() + 1).expect("check_record bounds a record to 250 bytes");
+    let len = u16::try_from(record.len() + 1).expect("a valid record is at most 250 bytes");
     [&[0x61][..], &len.to_be_bytes(), &[0x80, 0x60, 0x0a, 0x3d, 0x39, 0x3d, 0xf3, 0x00], record].concat()
 }
 
@@ -599,9 +540,9 @@ mod tests {
 
     #[test]
     fn deploy_code_layout() {
-        let rec = [0xefu8; V1_LEN]; // starts with 0xEF on purpose: the 0x00 prefix must protect it
+        let rec = [0xefu8; 152]; // starts with 0xEF on purpose: the 0x00 prefix must protect it
         let code = deploy_code(&rec);
-        assert_eq!(&code[..3], &[0x61, 0x00, 0x94]); // PUSH2 148 = 1 + 147
+        assert_eq!(&code[..3], &[0x61, 0x00, 0x99]); // PUSH2 153 = 1 + 152
         assert_eq!(code[10], 0x00); // the copy offset 0x0a lands exactly on the STOP byte
         assert_eq!(&code[11..], &rec);
         assert!(holds_record(&code[10..], &rec));
@@ -657,99 +598,22 @@ mod tests {
         assert_eq!(bump((0, 0)), (0, 0));
     }
 
-    fn v2(k: u8, kinds: &[u8], len: usize) -> Vec<u8> {
-        let mut r = vec![0x02, 0, 0, 0x40, 0, 3];
-        r.resize(22, 7);
-        r.extend([k, kinds.len() as u8]);
-        r.extend(kinds);
-        r.resize(len, 9);
+    /// A well-formed 2-of-2 record (passphrase and paper): 26 header bytes, 1 masked share, nonce, ciphertext.
+    fn record_bytes() -> Vec<u8> {
+        let mut r = vec![2, 0, 0, 4, 0, 3]; // version 2, m = 1024 KiB, t = 3
+        r.extend([0; 16]); // salt
+        r.extend([2, 2, 1, 3]); // k = 2, n = 2, kinds passphrase and paper
+        r.resize(26 + 32 + 12 + 49, 0xab);
         r
     }
 
     #[test]
-    fn record_rules() {
-        let v1 = |len: usize| [vec![1u8, 0, 0, 4, 0, 3], vec![0xab; len - 6]].concat();
-        assert!(check_record(&v1(V1_LEN)).is_ok());
-        assert!(check_record(&v1(V1_LEN + 1)).is_err());
-        assert!(check_record(&[0u8; V1_LEN]).unwrap_err().contains("version 0"));
-        assert!(check_record(&[]).is_err());
-        assert!(check_record(&[3u8; V1_LEN]).is_err());
-        // Presets of SPEC.md: 2-of-3 (passphrase, YubiKey, paper) 152 bytes; 3-of-5 186; largest 250.
-        assert!(check_record(&v2(2, &[1, 2, 3], 152)).is_ok());
-        assert!(check_record(&v2(3, &[1, 2, 2, 3, 3], 186)).is_ok());
-        assert!(check_record(&v2(3, &[1, 2, 2, 2, 2], 250)).is_ok());
-        assert!(check_record(&v2(2, &[3, 3], 87)).is_ok()); // all paper
-        assert!(check_record(&v2(2, &[1, 2, 3], 151)).is_err());
-        assert!(check_record(&v2(2, &[1, 2, 3], 153)).is_err());
-        assert!(check_record(&v2(1, &[1, 2, 3], 152)).is_err()); // k < 2
-        assert!(check_record(&v2(4, &[1, 2, 3], 152)).is_err()); // k > n
-        assert!(check_record(&v2(2, &[1, 2, 3, 3, 3, 3], 187)).is_err()); // n > 5
-        assert!(check_record(&v2(2, &[1, 4, 3], 152)).is_err()); // unknown kind
-        assert!(check_record(&v2(2, &[1, 2, 3], 152)[..23]).is_err()); // truncated header
-        assert!(check_record(&v2(2, &[1, 2, 3], 152)[..25]).is_err());
-    }
-
-    /// Valid vectors must be accepted. Invalid ones (they carry an `"error"`) must be refused, except a bad
-    /// plaintext, which only decryption can see.
-    #[test]
-    fn every_test_vector_record_is_checked() {
-        let mut counts = (0, 0);
-        for (file, json) in [("vectors.json", include_str!("../../vectors.json")), ("vectors-v2.json", include_str!("../../vectors-v2.json"))] {
-            // Each top-level object holds flat string fields (no JSON parser needed; keys are sorted, so
-            // `"error"` comes before `"name"`, which is why objects are cut by brace depth).
-            let (mut depth, mut start, mut objects) = (0, 0, Vec::new());
-            for (i, c) in json.char_indices() {
-                match c {
-                    '{' if depth == 0 => (depth, start) = (1, i),
-                    '{' => depth += 1,
-                    '}' if depth == 1 => (depth, _) = (0, objects.push(&json[start..=i])),
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-            }
-            for obj in objects {
-                let field = |key: &str| obj.split(&format!("\"{key}\"")).nth(1).map(|rest| rest.split('"').nth(1).unwrap());
-                let (name, hex) = (field("name").unwrap(), field("record").unwrap());
-                let r = alloy::hex::decode(hex).unwrap();
-                match field("error") {
-                    None => {
-                        check_record(&r).unwrap_or_else(|err| panic!("{file} {name}: {err}"));
-                        assert_eq!(parse_record(&format!("0x{hex}\n")).unwrap(), r);
-                        counts.0 += 1;
-                    }
-                    Some(why) if why.contains("plaintext") => assert!(check_record(&r).is_ok()),
-                    Some(_) => {
-                        assert!(check_record(&r).is_err(), "{file} {name} must be refused");
-                        counts.1 += 1;
-                    }
-                }
-            }
-        }
-        assert!(counts.0 >= 13 && counts.1 >= 3, "{counts:?}");
-    }
-
-    #[test]
-    fn argon_cost_bounds() {
-        let with_cost = |m: u32, t: u8| [&[1u8][..], &m.to_be_bytes(), &[t], &[0xab; V1_LEN - 6]].concat();
-        assert!(check_record(&with_cost(8, 1)).is_ok() && check_record(&with_cost(1 << 21, 16)).is_ok());
-        for (m, t) in [(7, 1), ((1 << 21) + 1, 1), (1024, 0), (1024, 17)] {
-            assert!(check_record(&with_cost(m, t)).is_err(), "m {m} t {t}");
-        }
-    }
-
-    #[test]
     fn record_parsing() {
-        let head = "010000040003"; // v1, m = 1024 KiB, t = 3
-        let ok = format!("0x{head}{}\n", "ab".repeat(V1_LEN - 6));
-        assert_eq!(parse_record(&ok).unwrap().len(), V1_LEN);
-        assert!(parse_record(&ok[2..]).is_err()); // no 0x
-        assert!(parse_record(&format!("0x{head}{}", "ab".repeat(V1_LEN - 7))).is_err());
-        assert!(parse_record(&format!("0x{head}{}zz", "ab".repeat(V1_LEN - 7))).is_err());
-    }
-
-    #[test]
-    fn record_id_is_sha256_prefix() {
-        // printf 'abc' | shasum -a 256 -> ba7816bf8f01cfea414140de5dae2223...
-        assert_eq!(record_id(b"abc"), "ba7816bf8f01cfea");
+        let hex = alloy::hex::encode(record_bytes());
+        assert_eq!(parse_record(&format!("0x{hex}\n")).unwrap(), record_bytes());
+        assert!(parse_record(&hex).is_err()); // no 0x
+        assert!(parse_record(&format!("0x{hex}00")).is_err()); // one byte too long
+        assert!(parse_record(&format!("0x{hex}zz")).is_err()); // not hex
+        assert!(parse_record(&format!("0x01{}", &hex[2..])).is_err()); // wrong version byte
     }
 }

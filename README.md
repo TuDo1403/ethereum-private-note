@@ -5,17 +5,18 @@ reveals anything**:
 
 | factor | what it is | where it lives |
 |--------|------------|----------------|
-| **A** passphrase | 7 BIP39 words, generated for you (77 bits) | paper |
-| **B** YubiKey | FIDO2 `hmac-secret` of a resident credential, unlocked by the key's PIN and a touch | the key |
-| **C** share C | 32 bytes written as 24 BIP39 words (looks like a seed, is not one) | paper |
+| **passphrase** | 7 BIP39 words, generated for you (77 bits) | paper |
+| **YubiKey** | FIDO2 `hmac-secret` of a resident credential, unlocked by the key's PIN and a touch | the key |
+| **paper share** | 32 bytes written as 24 BIP39 words (looks like a seed, is not one) | paper |
 
-The seed is encrypted with a random key, the key is split 2-of-3 with Shamir, and shares A and B are
-masked with pads derived from the passphrase and the YubiKey. The result is a 147-byte **record**
-that is public by design: it can be stored on any EVM chain, emailed to yourself, printed, kept in the
-cloud. Without two factors it is noise.
+The seed is encrypted with a random key, the key is split with Shamir, and the passphrase and YubiKey
+shares are masked with pads derived from the passphrase and the YubiKey. The result is a 152-byte
+**record** that is public by design: it can be stored on any EVM chain, emailed to yourself, printed, kept
+in the cloud. Without two factors it is noise.
 
-`SPEC.md` describes the format completely (enough to write a recovery tool in another language), and
-`vectors.json` / `vectors-v2.json` fix every intermediate value.
+The format is k-of-n (2 <= k <= n <= 5; any number of hardware and paper shares, at most one passphrase share); `vault` makes
+the 2-of-3 above. `SPEC.md` describes the format completely (enough to write a recovery tool in another
+language) and `vectors.json` fixes every intermediate value.
 
 > **Status.** Personal tool, not independently audited. The `publish` step has been tested against a
 > local `anvil` chain only. Read [Limitations](#limitations) before trusting it with real funds.
@@ -43,30 +44,31 @@ cloud. Without two factors it is noise.
 ```
 seed entropy ──AES-256-GCM(K)──► ciphertext ─┐
                                               │
-K ──2-of-3 Shamir──► y1 ──xor padA──► encA ───┤
-                     y2 ──xor padB──► encB ───┼──► record (147 bytes, public)
-                     y3 ──────────────────────┼──► share C (24 words, paper)
+K ──2-of-3 Shamir──► y1 ──xor pad1──► masked ─┤
+                     y2 ──xor pad2──► masked ─┼──► record (152 bytes, public)
+                     y3 ──────────────────────┼──► paper share (24 words, paper)
                                               │
-padA = HKDF(Argon2id(passphrase, 1 GiB, t=3, salt), header)
-padB = HKDF(YubiKey hmac-secret, header)
+pad1 = HKDF(Argon2id(passphrase, 1 GiB, t=3, salt), header)
+pad2 = HKDF(YubiKey hmac-secret, header)
 ```
 
-- **Passphrase + YubiKey**: both pads unmask encA and encB, two shares give K.
-- **Passphrase + share C** or **YubiKey + share C**: one unmasked share plus share C give K.
+- **Passphrase + YubiKey**: both pads unmask both shares, two shares give K.
+- **Passphrase + paper share** or **YubiKey + paper share**: one unmasked share plus the paper share give K.
 - AES-GCM authenticates the result, so a wrong factor is reported, never silently accepted.
 
-The record header (Argon2 cost, salt) is the AES-GCM associated data and is mixed into both pads, so
-each record has its own pads even though the YubiKey's secret is the same for every record.
+The record header (version, Argon2 cost, salt, k, n, share kinds) is the AES-GCM associated data and is mixed
+into every pad, so each record has its own pads even though the YubiKey's secret is the same for every
+record.
 
 ## Repository layout
 
 | path | what |
 |------|------|
 | `core/` (`epn-core`) | the format: Argon2id, HKDF, GF(2^8) Shamir, AES-GCM, BIP39 words, FIDO2 via libfido2 |
-| `vault/` (`vault`) | interactive wizard: **backup** and guided **restore** (v1, 2-of-3) |
-| `recover/` (`recover`) | small, scriptable **restore-only** tool for v1 and v2 records; the one to keep for emergencies |
+| `vault/` (`vault`) | interactive wizard: **backup** and guided **restore** |
+| `recover/` (`recover`) | small, scriptable **restore-only** tool; the one to keep for emergencies |
 | `publish/` (`publish`) | online step: deploys the record as contract code from a throwaway gas key ([details](publish/README.md)) |
-| `SPEC.md` | the backup format, v1 (2-of-3) and v2 (k-of-n) |
+| `SPEC.md`, `vectors.json` | the backup format, and fixed test vectors for it |
 | `vendor/` | every Rust dependency, pinned and vendored, so this builds offline years from now |
 
 ## Install
@@ -100,7 +102,7 @@ the offline machine you will use.
   unplugged for the whole session. It needs 2 GiB of free RAM (Argon2id uses 1 GiB).
 - **A YubiKey 5 (or any FIDO2 key with `hmac-secret`) with a FIDO2 PIN set.** Set the PIN first, for
   example with `ykman fido access change-pin`. Without a PIN the key cannot be used.
-- **Paper and a pen** for the passphrase and share C. Steel plates if you want fire/water resistance.
+- **Paper and a pen** for the passphrase and the paper share. Steel plates if you want fire/water resistance.
 - **An online machine** for `publish` (later, no secrets involved).
 - **A wallet with a little ETH** on the chain you choose, to fund the throwaway publishing address.
 
@@ -112,7 +114,7 @@ The rule: **no single place holds two factors.** A suggested layout:
 |-------|-------|
 | home safe | passphrase paper |
 | on you / your desk | YubiKey (its PIN in your head or your password manager, never on the key) |
-| second location (bank box, trusted family) | share C paper, labelled *"backup share, not a wallet"* |
+| second location (bank box, trusted family) | paper share, labelled *"backup share 3, not a wallet"* |
 | anywhere, several copies | recovery sheet, `record.hex`, a printout of `SPEC.md` |
 
 Losing one factor is survivable: the other two still restore. Restore at once and make a new backup,
@@ -147,12 +149,12 @@ steps:
    between words. The screen is cleared and you must type them back.
 4. **Build, check and save.** PIN and touch again, then Argon2id (1 GiB, takes a while). Every pair of
    factors is tried against the new record; if any pair fails, nothing is saved. Then the two public
-   files, `record.hex` and `recovery-sheet.txt`, are written (and synced to disk) **before** share C is
-   shown, so a crash later cannot leave you with papers and no record. If writing fails, `vault` says
-   so: destroy the papers of that run and start again.
-5. **Share C.** 24 words are shown once. Write them on a *separate* paper and label it *"backup share,
-   not a wallet"*. Then type all 24 back (hidden); a mismatch shows share C again so you can correct the
-   paper.
+   files, `record.hex` and `recovery-sheet.txt`, are written (and synced to disk) **before** the paper
+   share is shown, so a crash later cannot leave you with papers and no record. If writing fails, `vault`
+   says so: destroy the papers of that run and start again.
+5. **Paper share.** 24 words are shown once. Write them on a *separate* paper and label it *"backup
+   share 3, not a wallet"*. Then type all 24 back (hidden); a mismatch shows the share again so you can
+   correct the paper.
 6. **Next steps** are printed: test the papers with a verify-only restore, publish the record, fill in
    the recovery sheet.
 
@@ -187,7 +189,7 @@ Recommended flags:
   claim a store that did not happen.
 - `--confirmations <n>` (default 1): wait for more blocks before the read-back.
 
-The refund address must start with `0x`, have a valid checksum if mixed-case, and be an EOA (no code).
+The refund address must start with `0x`, have a valid checksum if mixed-case, and be an EOA (no code), not the zero address.
 Fee quotes over 500 gwei/gas or 0.5 ETH total are refused without `--allow-high-fees`. See
 [`publish/README.md`](publish/README.md) for the full safety behaviour.
 
@@ -205,8 +207,8 @@ The output must be `0x00` followed by the contents of `record.hex` (without its 
 `vault restore`, choose **2 (verify only)**, and restore with each of the three pairs:
 
 1. passphrase + YubiKey
-2. passphrase + share C
-3. YubiKey + share C
+2. passphrase + paper share
+3. YubiKey + paper share
 
 Verify only prints the seed fingerprint instead of the seed, so a test never puts your seed on screen.
 It must equal the fingerprint on the recovery sheet. `vault` already checked all three pairs against
@@ -229,43 +231,17 @@ the seed is printed on screen.
 Choose 1 to show the seed or 2 to verify only (seed fingerprint, never the seed). Paste the record
 hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the credential id).
 Say which factors you have; the YubiKey is asked first so a missing key or wrong PIN fails before you
-type anything. Share C is entered word by word, the passphrase hidden. Three attempts. This is the
-normal way to restore: every secret is read at a hidden prompt.
+type anything. The paper share is entered word by word, the passphrase hidden. Three attempts. This is
+the normal way to restore: every secret is read at a hidden prompt.
 
-### Scripted: `recover restore` (v1)
+### Scripted: `recover restore`
 
-`recover` is deliberately tiny and reads secrets **only from stdin**, never from arguments, so they do
-not land in `ps`. stdin line 1 is share C (24 words, or empty), the rest is the passphrase (or empty).
-Pass `--cred-id` to use the YubiKey. Read the secrets at hidden prompts:
-
-```bash
-IFS= read -rs C; IFS= read -rs P; printf '%s\n%s' "$C" "$P" | ./recover restore <record-hex> [--cred-id ID [--device PATH]]; unset C P
-```
-
-then type the share C words, Enter, the passphrase (or nothing), Enter. Nothing is shown. **Never type
-the words or the passphrase into the command line itself** (for example inside `printf`): your shell
-saves the whole line in its history file. Exactly one trailing `\n` or `\r\n` is stripped from the
-passphrase; nothing else is trimmed. Share C is checked before the YubiKey prompt and before Argon2.
-
-The seed words go to stdout, the factors used to stderr. Exit code 0 is success, 1 is a failed
-restore, 2 is a usage error. Errors never echo what you typed; a bad word is reported by its position.
-
-If the recovery sheet is lost, the credential id can be listed from the key with its PIN:
+`recover` is deliberately small and reads secrets **only from stdin**, never from arguments, so they do
+not land in `ps`. Run it alone, then type one factor per line and end with Ctrl-D:
 
 ```bash
-fido2-token -L -k localhost <device>
+./recover restore <record-hex> [--key X=CRED_ID]... [--device PATH]
 ```
-
-### v2 (k-of-n) records
-
-Records whose first byte is `02` are restored with:
-
-```bash
-./recover restore <record-hex> [--key X=CRED_ID]... [--device PATH] < factors
-```
-
-with one factor per line, typed on stdin after running the command alone (end with Ctrl-D; input is
-visible, so mind the screen, but it never reaches shell history):
 
 ```
 pass <passphrase>        the passphrase: everything after the first space, not trimmed
@@ -273,7 +249,20 @@ paper <X> <24 words>     the paper share printed as share X
 hw <X> <64 hex digits>   a hardware secret, instead of --key
 ```
 
-See `SPEC.md` ("`recover restore` for v2") for the exact rules.
+`--key X=CRED_ID` asks the YubiKey that is share X for its secret (PIN and touch). For a backup made by
+`vault`, the YubiKey is share 2 and the paper share is share 3; the recovery sheet prints the exact
+command. Input is visible on screen, so mind the screen, but it never reaches shell history. **Never type
+a factor into the command line itself**: your shell saves the whole line in its history file.
+
+The seed words go to stdout, the shares used to stderr. Exit code 0 is success, 1 is a failed restore,
+2 is a usage error. Errors never echo what you typed; a bad word is reported by its position or line.
+See `SPEC.md` ("Restoring") for the exact rules.
+
+If the recovery sheet is lost, the credential id can be listed from the key with its PIN:
+
+```bash
+fido2-token -L -k localhost <device>
+```
 
 ### Without these tools
 
@@ -289,7 +278,7 @@ same value a browser's WebAuthn PRF extension returns for rpId `localhost` and i
 
 | attacker holds | result |
 |----------------|--------|
-| the record only | nothing: three uniformly masked or missing shares |
+| the record only | nothing: masked or missing shares |
 | record + any **one** factor | nothing about the seed, **but** see passphrase guessing below |
 | record + any **two** factors | the seed |
 
@@ -298,31 +287,31 @@ factors.
 
 ### The passphrase is the weakest link, so it is generated
 
-Anyone with the record and **one** of share C or the YubiKey (with its PIN) can test passphrase guesses
-offline, for as long as they like. That is why the passphrase is generated (7 random words, 77 bits)
-and stretched with Argon2id at 1 GiB and 3 passes: brute force is far out of reach. Do not replace it
-with something you chose, and do not shorten it.
+Anyone with the record and **one** of the paper share or the YubiKey (with its PIN) can test passphrase
+guesses offline, for as long as they like. That is why the passphrase is generated (7 random words,
+77 bits) and stretched with Argon2id at 1 GiB and 3 passes: brute force is far out of reach. Do not
+replace it with something you chose, and do not shorten it.
 
 ### A leaked factor cannot be revoked
 
 The on-chain record is write-once and can never be deleted, and copies may exist anywhere. If any
-single factor is exposed (paper photographed, YubiKey stolen together with its PIN, share C seen),
+single factor is exposed (paper photographed, YubiKey stolen together with its PIN, paper share seen),
 making a new backup does **not** help, because the old record stays attackable with that factor.
 **Move the funds to a new seed**, then back up the new seed.
 
 ### YubiKey
 
-- Its PIN is the only thing between a thief of the key and factor B. Never store the PIN with the key.
+- Its PIN is the only thing between a thief of the key and its factor. Never store the PIN with the key.
   FIDO2 locks the key after repeated wrong PINs.
 - The credential is tied to that physical key. It cannot be copied to a second YubiKey; a spare key
   does not replace a lost one (the other two factors do).
 - **Never reset the FIDO2 application** on the key (`ykman fido reset`): that destroys the credential,
-  and factor B with it.
+  and its factor with it.
 - The credential uses rpId `localhost`. Software on any machine the key is plugged into that can make
   you enter the PIN and touch the key can obtain the secret. Only enter the PIN and touch the key when
   `vault` or `recover` asks, on a machine you trust.
 
-### Share C looks like a wallet seed
+### The paper share looks like a wallet seed
 
 It is 24 valid BIP39 words. Someone who finds it may import it as a wallet (it will be empty) and move
 on, which is harmless, but you might also mistake it for your seed. Label it. Store it apart from the
@@ -332,24 +321,24 @@ passphrase and the YubiKey.
 
 - `vault` and `recover` need no network. Run backups and restores **offline**: the seed and secrets
   pass through memory and the screen.
-- `vault` wipes seed, passphrase and key material from its memory after use (`zeroize`), but the OS
-  may still have paged memory to disk. A live OS without swap, or a machine with encrypted swap and
+- `vault` wipes seed, passphrase and key material from its memory after use (`zeroize`, best effort:
+  copies made inside the format crate are not wiped), and the OS may still have paged memory to disk. A live OS without swap, or a machine with encrypted swap and
   hibernation off, avoids leaving copies on disk.
 - Keep secrets out of anything that records the terminal: scrollback, screen recording, tmux logs,
   shell history, clipboard managers, screenshots syncing to the cloud. Clear the terminal afterwards.
 - Never put secrets in a command line (as arguments, or inside a `printf ... | recover` pipeline) or
-  `export` them in a shell whose history is saved. `recover` takes them on stdin for this reason; read
-  them with `read -rs` as shown above, or use `vault restore`.
+  `export` them in a shell whose history is saved. `recover` takes them on stdin for this reason; or use
+  `vault restore`.
 - Build from this repository's vendored sources (`--offline --locked`) on a machine you trust, and
   check you are running the binary you built.
 
 ### On-chain privacy
 
-The record reveals that an address holds an Ethereum Private Note backup, its format version, and for
-v2 the threshold and how many shares exist. The throwaway sender holds nothing and is not derived from
-your seed, but **the transaction that funds it links it to your wallet**, and the sweep links it to
-the refund address. If you do not want your identity associated with a backup record, fund it from an
-address that is not tied to you.
+The record reveals that an address holds an Ethereum Private Note backup, the threshold and how many
+shares exist. The throwaway sender holds nothing and is not derived from your seed, but **the
+transaction that funds it links it to your wallet**, and the sweep links it to the refund address. If
+you do not want your identity associated with a backup record, fund it from an address that is not
+tied to you.
 
 ### The RPC node
 
@@ -363,19 +352,19 @@ with `cast code` against a node you trust before relying on it.
 - Keep the record in several places besides the chain: the recovery sheet, email, cloud storage, and
   with each factor paper. Reading it from the chain needs the chain id and the record's address, which
   no factor can regenerate.
-- Keep `SPEC.md` printed with share C, and keep a copy of this repository (with `vendor/`) somewhere
-  durable. `recover` builds offline from it.
-- v1 records stay valid forever; a future format must change the version byte.
+- Keep `SPEC.md` printed with the paper share, and keep a copy of this repository (with `vendor/`)
+  somewhere durable. `recover` builds offline from it.
+- The record carries a version byte; a future format must change it. Records of the earlier version 1
+  are not read by these tools; the git tag `v1-final` holds the last tools that did.
 
 ## Limitations
 
 - **Not independently audited.** Treat it as such.
 - **`publish` has not been run against a real network yet**, only a local `anvil` chain. Do a full
   test run on a testnet before mainnet. Legacy (non-EIP-1559) chains are unsupported.
-- **Backups are v1 (2-of-3) only.** The v2 k-of-n format is specified and `recover` restores it, but no
-  tool creates v2 records yet, and `publish` accepts only 147-byte v1 records.
+- `vault backup` makes only the 2-of-3 layout with one YubiKey. Other k-of-n layouts are in the format
+  and are restored by `recover` and `vault restore`, but nothing here creates them.
 - `recover` does not wipe secrets from memory after use (`vault` does).
-- One YubiKey per v1 backup; a v1 backup has no second hardware factor.
 
 ## Development
 
@@ -384,4 +373,5 @@ cargo test --offline --locked     # unit, format vectors, CLI, and anvil end-to-
 ```
 
 The test profile builds with `opt-level = 3` because the real-parameter vector runs Argon2id at
-1 GiB. The anvil tests in `publish/` skip if `anvil` is not installed.
+1 GiB. The anvil tests in `publish/` skip if `anvil` is not installed; the `vault` test skips if
+`expect` is not installed.

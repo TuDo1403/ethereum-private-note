@@ -5,15 +5,15 @@ edition = "2024"
 rust-version = "1.94"
 
 # ONLINE half of the backup: publishes the public record.hex on chain. Handles no secret except a
-# throwaway gas key that lives in memory only. Deliberately independent of epn-core.
+# throwaway gas key that lives in memory only. It shares the format crate for the record check (so it
+# can never publish a record that `recover` would refuse) and the record id.
 [dependencies]
 # No default features: they pull rustls -> aws-lc-sys (a C build) for https. native-tls uses the OS TLS
 # (Security.framework on macOS; system OpenSSL on Linux). "essentials" = HTTP provider, local signer,
 # rpc types.
 alloy = { version = "=2.5.0", default-features = false, features = ["essentials", "std", "reqwest", "reqwest-native-tls"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time"] }
-# Record id (SHA-256); the same pinned version core uses.
-sha2 = "=0.10.8"
+epn-core = { path = "../core" }
 
 # Signal handler that only sets a flag (tokio's `signal` feature would need two more crates vendored).
 [target.'cfg(unix)'.dependencies]

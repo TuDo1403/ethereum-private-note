@@ -1,19 +1,35 @@
-//! Record format v2 (see "Format v2" in ../../SPEC.md): general k-of-n Shamir, 2 <= k <= n <= 5.
-//! Every share has a kind. Passphrase and hardware shares are stored on chain, masked with a pad; paper
-//! shares are never in the record. `tests/vectors_v2.rs` rebuilds ../../vectors-v2.json byte for byte.
-//! v1 (lib.rs) is untouched and keeps working.
+//! The record (see SPEC.md): k-of-n Shamir sharing of an AES key, 2 <= k <= n <= 5. Every share has a kind.
+//! Passphrase and hardware shares are stored on chain, masked with a pad; paper shares are never in the
+//! record. `tests/vectors.rs` rebuilds ../../vectors.json byte for byte.
 
-use super::{argon2id, entropy_to_words, ginv, gmul, hkdf_pad, words_to_entropy};
+use crate::bip39::{entropy_to_words, share_from_words};
+use crate::shamir::{interpolate, poly_at};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use argon2::{Algorithm, Argon2, Params, Version};
+use hkdf::Hkdf;
+use sha2::Sha256;
+use unicode_normalization::UnicodeNormalization;
 
-pub const VERSION: u8 = 2;
-pub const MAX_N: usize = 5;
+const VERSION: u8 = 2;
+const MAX_N: usize = 5;
+/// 1 GiB, 3 passes. A restore needs this much free memory, so do not pick a number your recovery
+/// machine cannot allocate.
+pub const ARGON_M_KIB: u32 = 1 << 20;
+pub const ARGON_T: u8 = 3;
+// m and t come from the record, i.e. from untrusted input. 2 GiB is twice the real 1 GiB; each pass costs
+// as much time as the whole 1 GiB hash, and the real t is 3. 16 leaves room to raise it later and still
+// bounds the time a forged record can burn.
+const MAX_M_KIB: u32 = 1 << 21;
+const MAX_T: u8 = 16;
 /// version, m, t, salt, k, n; the kinds follow, one byte per share.
 const FIXED_HEADER: usize = 24;
 /// nonce, then 33 bytes of padded plaintext and the 16-byte GCM tag.
 const NONCE: usize = 12;
 const CT: usize = 33 + 16;
+/// (x, 32 bytes): a factor (the pad of an on-chain share, or a paper share), or a share once unmasked.
+pub type Share = (u8, [u8; 32]);
+const ENTROPY_LENGTHS: [usize; 5] = [16, 20, 24, 28, 32];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -41,47 +57,76 @@ impl Kind {
 
 /// A parsed header. `kinds[i]` is the kind of the share at x = i + 1.
 pub struct Header {
-    pub m: u32,
-    pub t: u8,
-    pub salt: [u8; 16],
+    m: u32,
+    t: u8,
+    salt: [u8; 16],
     pub k: usize,
     pub kinds: Vec<Kind>,
 }
 
 impl Header {
-    pub fn len(&self) -> usize {
+    /// The kind of the share at x (1-based), if there is one.
+    pub fn kind_at(&self, x: u8) -> Option<Kind> {
+        self.kinds.get((x as usize).wrapping_sub(1)).copied()
+    }
+    /// The x of the passphrase share, if the record has one.
+    pub fn passphrase_x(&self) -> Option<u8> {
+        self.kinds.iter().position(|&k| k == Kind::Passphrase).map(|i| i as u8 + 1)
+    }
+    pub fn header_len(&self) -> usize {
         FIXED_HEADER + self.kinds.len()
     }
     /// Masked shares are stored in increasing x, so the layout depends on how many are on chain.
     pub fn record_len(&self) -> usize {
-        self.len() + 32 * self.kinds.iter().filter(|k| k.on_chain()).count() + NONCE + CT
+        self.header_len() + 32 * self.kinds.iter().filter(|k| k.on_chain()).count() + NONCE + CT
     }
+}
+
+/// The range of Argon2 costs a record may ask for: m in 8..=2^21 KiB (8 is the Argon2 minimum for one
+/// lane), t in 1..=16.
+fn check_argon_cost(m: u32, t: u8) -> Result<(), String> {
+    if !(8..=MAX_M_KIB).contains(&m) || !(1..=MAX_T).contains(&t) {
+        return Err(format!("record asks for Argon2 m = {m} KiB, t = {t}; refusing outside m 8..={MAX_M_KIB}, t 1..={MAX_T}"));
+    }
+    Ok(())
 }
 
 /// Parses and validates the header at the start of `bytes` (a record or just a header). Everything in it
 /// comes from untrusted input, so nothing here may allocate by an attacker's number.
 pub fn parse_header(bytes: &[u8]) -> Result<Header, String> {
-    if bytes.len() < FIXED_HEADER || bytes[0] != VERSION {
-        return Err("not a v2 record".into());
+    match bytes.first() {
+        None => return Err("record is empty".into()),
+        Some(&VERSION) => {}
+        Some(v) => return Err(format!("unknown record version {v}; only version {VERSION} is supported")),
     }
-    let (k, n) = (bytes[22] as usize, bytes[23] as usize);
-    if k < 2 || k > n || n > MAX_N || bytes.len() < FIXED_HEADER + n {
-        return Err("not a v2 record (bad k or n)".into());
+    let too_short = || "record is too short".to_string();
+    let (k, n) = (*bytes.get(22).ok_or_else(too_short)? as usize, *bytes.get(23).ok_or_else(too_short)? as usize);
+    if k < 2 || k > n || n > MAX_N {
+        return Err(format!("bad k or n: k = {k}, n = {n}; need 2 <= k <= n <= {MAX_N}"));
     }
     let (m, t) = (u32::from_be_bytes(bytes[1..5].try_into().unwrap()), bytes[5]);
-    super::check_argon_cost(m, t)?;
-    let kinds = bytes[FIXED_HEADER..FIXED_HEADER + n].iter().map(|&b| Kind::from_byte(b)).collect::<Result<Vec<_>, _>>()?;
+    check_argon_cost(m, t)?;
+    let kinds = bytes
+        .get(FIXED_HEADER..FIXED_HEADER + n)
+        .ok_or_else(too_short)?
+        .iter()
+        .map(|&b| Kind::from_byte(b))
+        .collect::<Result<Vec<_>, _>>()?;
     // A second passphrase share would be the same factor under a second pad: no extra security.
     if kinds.iter().filter(|&&k| k == Kind::Passphrase).count() > 1 {
         return Err("at most one passphrase share".into());
     }
-    Ok(Header {
-        m,
-        t,
-        salt: bytes[6..22].try_into().unwrap(),
-        k,
-        kinds,
-    })
+    Ok(Header { m, t, salt: bytes[6..22].try_into().unwrap(), k, kinds })
+}
+
+/// `parse_header` plus the exact length the header implies. The one check of what makes a record, used
+/// by every reader and by `publish` before it spends anything.
+pub fn parse_record(record: &[u8]) -> Result<Header, String> {
+    let h = parse_header(record)?;
+    if record.len() != h.record_len() {
+        return Err(format!("not a record for this header (expected {} bytes, got {})", h.record_len(), record.len()));
+    }
+    Ok(h)
 }
 
 /// The header bytes: the AES-GCM associated data and the input to every pad derivation.
@@ -93,52 +138,45 @@ pub fn new_header(m: u32, t: u8, salt: &[u8], k: usize, kinds: &[Kind]) -> Resul
     Ok(header)
 }
 
-/// 2-of-3: passphrase (x=1), YubiKey (x=2), paper (x=3).
-pub fn header_2_of_3(m: u32, t: u8, salt: &[u8]) -> Vec<u8> {
-    new_header(m, t, salt, 2, &[Kind::Passphrase, Kind::Hardware, Kind::Paper]).expect("valid preset")
-}
-
-/// 3-of-5: passphrase (x=1), two YubiKeys (x=2,3), two paper (x=4,5).
-pub fn header_3_of_5(m: u32, t: u8, salt: &[u8]) -> Vec<u8> {
-    new_header(m, t, salt, 3, &[Kind::Passphrase, Kind::Hardware, Kind::Hardware, Kind::Paper, Kind::Paper]).expect("valid preset")
-}
-
-/// The Argon2id output for the passphrase. The cost is here, so a caller needing the pad of the
-/// passphrase share does this once and then calls `pad`.
+/// The Argon2id output for the passphrase: v1.3, parallelism 1, 32 bytes, over the NFKD form of the
+/// passphrase. The cost is here, so a caller needing the pad of the passphrase share does this once and
+/// then calls `pad`.
 pub fn stretch_passphrase(passphrase: &str, header: &[u8]) -> Result<[u8; 32], String> {
     let h = parse_header(header)?;
-    argon2id(passphrase, h.m, h.t, &h.salt)
+    let params = Params::new(h.m, h.t as u32, 1, Some(32)).map_err(|e| e.to_string())?;
+    let normalized: String = passphrase.nfkd().collect();
+    let mut argon = [0u8; 32];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(normalized.as_bytes(), &h.salt, &mut argon)
+        .map_err(|e| e.to_string())?;
+    Ok(argon)
 }
 
 /// The pad for the on-chain share at `x`. `secret` is the Argon2id output (passphrase share) or the
 /// 32-byte hardware secret. The label is the share's x, never its position among the masked shares
-/// (they differ as soon as a paper share has a smaller x). The label `bk2/<x>` and the whole header are in the HKDF info, so a pad is
-/// never reused across shares (a passphrase and a hardware secret that happen to be equal) or records
-/// (the hardware secret is the same for every record; the salt in the header is not).
+/// (they differ as soon as a paper share has a smaller x). The label `bk2/<x>` and the whole header are
+/// in the HKDF info, so a pad is never reused across shares (a passphrase and a hardware secret that
+/// happen to be equal) or records (the hardware secret is the same for every record; the salt in the
+/// header is not).
 pub fn pad(secret: &[u8], header: &[u8], x: u8) -> [u8; 32] {
-    hkdf_pad(secret, &[b"bk2/".as_slice(), &[b'0' + x], header].concat())
+    let mut out = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(&[0u8; 32]), secret)
+        .expand(&[b"bk2/".as_slice(), &[b'0' + x], header].concat(), &mut out)
+        .expect("32 bytes is a valid length");
+    out
 }
 
-/// Value of the share polynomial at x, byte by byte: coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 ... (Horner).
-fn poly_at(coeffs: &[Vec<u8>], x: u8) -> [u8; 32] {
-    std::array::from_fn(|i| coeffs.iter().rev().fold(0, |acc, c| gmul(acc, x) ^ c[i]))
+fn cipher(key: &[u8]) -> Aes256Gcm {
+    Aes256Gcm::new_from_slice(key).expect("32-byte key")
 }
 
-/// The polynomial at 0 from k points with distinct nonzero x. In characteristic 2 "minus" is xor, so
-/// the Lagrange weight of point i is the product over j != i of x_j / (x_i ^ x_j).
-fn interpolate(points: &[(u8, [u8; 32])]) -> [u8; 32] {
-    let mut secret = [0u8; 32];
-    for (i, &(xi, yi)) in points.iter().enumerate() {
-        let weight = points
-            .iter()
-            .enumerate()
-            .filter(|&(j, _)| j != i)
-            .fold(1, |w, (_, &(xj, _))| gmul(w, gmul(xj, ginv(xi ^ xj))));
-        for b in 0..32 {
-            secret[b] ^= gmul(yi[b], weight);
-        }
-    }
-    secret
+/// The 33-byte plaintext: entropy length, entropy, then zero padding. The padding is checked on opening,
+/// so there is exactly one valid plaintext per seed and nothing can hide in the spare bytes.
+fn check_plaintext(plain: &[u8]) -> Result<(), String> {
+    let ok = plain.len() == 33
+        && ENTROPY_LENGTHS.contains(&(plain[0] as usize))
+        && plain[1 + plain[0] as usize..].iter().all(|&b| b == 0);
+    if ok { Ok(()) } else { Err("malformed plaintext".into()) }
 }
 
 /// `pads` holds (x, pad) for exactly the on-chain shares. `random(n)` is injectable so test vectors can
@@ -146,15 +184,15 @@ fn interpolate(points: &[(u8, [u8; 32])]) -> [u8; 32] {
 /// Returns the record and the paper shares (x, share). The key is the polynomial's constant term.
 pub fn seal(
     header: &[u8],
-    pads: &[(u8, [u8; 32])],
+    pads: &[Share],
     entropy: &[u8],
     random: &mut dyn FnMut(usize) -> Vec<u8>,
-) -> Result<(Vec<u8>, Vec<(u8, [u8; 32])>), String> {
+) -> Result<(Vec<u8>, Vec<Share>), String> {
     let h = parse_header(header)?;
-    if header.len() != h.len() {
+    if header.len() != h.header_len() {
         return Err("seal takes the header alone".into());
     }
-    if ![16, 20, 24, 28, 32].contains(&entropy.len()) {
+    if !ENTROPY_LENGTHS.contains(&entropy.len()) {
         return Err("entropy must be 16, 20, 24, 28 or 32 bytes".into());
     }
     let mut xs: Vec<u8> = pads.iter().map(|p| p.0).collect();
@@ -168,13 +206,12 @@ pub fn seal(
     let mut plain = [0u8; 33];
     plain[0] = entropy.len() as u8;
     plain[1..1 + entropy.len()].copy_from_slice(entropy);
-    let ct = Aes256Gcm::new_from_slice(&coeffs[0])
-        .expect("32-byte key")
+    let ct = cipher(&coeffs[0])
         .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: header })
         .map_err(|_| "encryption failed".to_string())?;
     let mut record = header.to_vec();
     let mut paper = Vec::new();
-    for &x in &(1..=h.kinds.len() as u8).collect::<Vec<_>>() {
+    for x in 1..=h.kinds.len() as u8 {
         let y = poly_at(&coeffs, x);
         match pads.iter().find(|p| p.0 == x) {
             Some((_, pad)) => record.extend((0..32).map(|i| y[i] ^ pad[i])),
@@ -190,21 +227,17 @@ pub fn seal(
 /// Opens the record from factors given as (x, 32 bytes): the pad for an on-chain x, the share itself for
 /// a paper x. Tries every k-subset, so wrong factors among extras do not matter. Returns the entropy and
 /// the x of the factors that opened it. Fewer than k factors is an error, not a guess.
-pub fn unseal(record: &[u8], factors: &[(u8, [u8; 32])]) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let h = parse_header(record)?;
-    if record.len() != h.record_len() {
-        return Err(format!("not a v2 record for this header (expected {} bytes)", h.record_len()));
-    }
-    let header = &record[..h.len()];
-    let mut shares: Vec<(u8, [u8; 32])> = Vec::new();
+pub fn unseal(record: &[u8], factors: &[Share]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let h = parse_record(record)?;
+    let header = &record[..h.header_len()];
+    let mut shares: Vec<Share> = Vec::new();
     for &(x, v) in factors {
-        if x == 0 || x as usize > h.kinds.len() || shares.iter().any(|s| s.0 == x) {
-            return Err(format!("factor x={x} is out of range or given twice"));
-        }
-        let share = if h.kinds[x as usize - 1].on_chain() {
+        let kind = h.kind_at(x).filter(|_| !shares.iter().any(|s| s.0 == x));
+        let Some(kind) = kind else { return Err(format!("factor x={x} is out of range or given twice")) };
+        let share = if kind.on_chain() {
             // Masked shares are stored in x order; this one is the (number of on-chain shares before x)th.
             let idx = h.kinds[..x as usize - 1].iter().filter(|k| k.on_chain()).count();
-            let off = h.len() + 32 * idx;
+            let off = h.header_len() + 32 * idx;
             std::array::from_fn(|i| record[off + i] ^ v[i])
         } else {
             v
@@ -219,12 +252,11 @@ pub fn unseal(record: &[u8], factors: &[(u8, [u8; 32])]) -> Result<(Vec<u8>, Vec
         if mask.count_ones() as usize != h.k {
             continue;
         }
-        let subset: Vec<(u8, [u8; 32])> = (0..shares.len()).filter(|i| mask >> i & 1 == 1).map(|i| shares[i]).collect();
-        let opened = Aes256Gcm::new_from_slice(&interpolate(&subset))
-            .expect("32-byte key")
+        let subset: Vec<Share> = (0..shares.len()).filter(|i| mask >> i & 1 == 1).map(|i| shares[i]).collect();
+        let opened = cipher(&interpolate(&subset))
             .decrypt(Nonce::from_slice(&record[nonce_at..nonce_at + NONCE]), Payload { msg: &record[nonce_at + NONCE..], aad: header });
         if let Ok(plain) = opened {
-            super::check_plaintext(&plain)?;
+            check_plaintext(&plain)?;
             return Ok((plain[1..1 + plain[0] as usize].to_vec(), subset.iter().map(|s| s.0).collect()));
         }
     }
@@ -241,19 +273,14 @@ pub fn check_factors(
     passphrase: bool,
     hardware: &[u8],
     paper: &[(u8, &str)],
-) -> Result<Vec<(u8, [u8; 32])>, String> {
-    let h = parse_header(record)?;
-    if record.len() != h.record_len() {
-        return Err(format!("not a v2 record for this header (expected {} bytes)", h.record_len()));
-    }
-    let kind_at = |x: u8| h.kinds.get((x as usize).wrapping_sub(1)).copied();
+) -> Result<Vec<Share>, String> {
+    let h = parse_record(record)?;
     let mut seen: Vec<u8> = Vec::new();
     if passphrase {
-        let x = h.kinds.iter().position(|&k| k == Kind::Passphrase).ok_or("this record has no passphrase share")?;
-        seen.push(x as u8 + 1);
+        seen.push(h.passphrase_x().ok_or("this record has no passphrase share")?);
     }
     let mut note = |x: u8, want: Kind, what: &str| -> Result<(), String> {
-        if kind_at(x) != Some(want) {
+        if h.kind_at(x) != Some(want) {
             return Err(format!("share {x} is not a {what} share of this record"));
         }
         if seen.contains(&x) {
@@ -268,8 +295,8 @@ pub fn check_factors(
     let mut shares = Vec::new();
     for &(x, words) in paper {
         note(x, Kind::Paper, "paper")?;
-        let share = words_to_entropy(words).ok().and_then(|e| <[u8; 32]>::try_from(e).ok());
-        shares.push((x, share.ok_or(format!("paper share {x} is not 24 valid BIP39 words with a correct checksum"))?));
+        let share = share_from_words(words).map_err(|_| format!("paper share {x} is not 24 valid BIP39 words with a correct checksum"))?;
+        shares.push((x, share));
     }
     if seen.len() < h.k {
         return Err(format!("need at least {} factors, got {}", h.k, seen.len()));
@@ -283,21 +310,42 @@ pub fn check_factors(
 pub fn restore(
     record: &[u8],
     passphrase: Option<&str>,
-    hardware: &[(u8, [u8; 32])],
+    hardware: &[Share],
     paper: &[(u8, &str)],
 ) -> Result<(String, Vec<u8>), String> {
     // Everything cheap first: the Argon2 below costs seconds and its parameters come from the header.
     let xs: Vec<u8> = hardware.iter().map(|h| h.0).collect();
     let mut factors = check_factors(record, passphrase.is_some(), &xs, paper)?;
     let h = parse_header(record)?;
-    let header = &record[..h.len()];
+    let header = &record[..h.header_len()];
     for &(x, secret) in hardware {
         factors.push((x, pad(&secret, header, x)));
     }
     if let Some(p) = passphrase {
-        let x = h.kinds.iter().position(|&k| k == Kind::Passphrase).unwrap() as u8 + 1;
+        let x = h.passphrase_x().expect("check_factors saw a passphrase share");
         factors.push((x, pad(&stretch_passphrase(p, header)?, header, x)));
     }
     let (entropy, used) = unseal(record, &factors)?;
     Ok((entropy_to_words(&entropy), used))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argon_cost_bounds() {
+        assert!(check_argon_cost(8, 1).is_ok());
+        assert!(check_argon_cost(1 << 21, 16).is_ok(), "the caps themselves are allowed");
+        for (m, t) in [(7, 1), (1024, 0), ((1 << 21) + 1, 1), (1024, 17), (u32::MAX, 255)] {
+            assert!(check_argon_cost(m, t).is_err(), "m={m} t={t}");
+        }
+        assert!(check_argon_cost((1 << 21) + 1, 1).unwrap_err().contains("refusing"));
+        assert!(check_argon_cost(1024, 17).unwrap_err().contains("refusing"));
+        // A header is refused before any work, whoever made it; t = 16 at the smallest memory is fast.
+        let kinds = [Kind::Passphrase, Kind::Hardware];
+        assert!(new_header(1024, 17, &[0; 16], 2, &kinds).is_err());
+        assert!(new_header(1 << 22, 1, &[0; 16], 2, &kinds).is_err());
+        assert!(stretch_passphrase("x", &new_header(8, 16, &[0; 16], 2, &kinds).unwrap()).is_ok());
+    }
 }

@@ -16,7 +16,7 @@ proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # wait, or the pty echoes the "hidden" seed into the transcript that the test checks for leaks.
 proc secret {s} { sleep 0.3; send "$s\r" }
 proc type_words {words} {
-    foreach w $words { expect -re {share C word [0-9]+/24[^:]*: }; send "$w\r" }
+    foreach w $words { expect -re {paper share [0-9]+, word [0-9]+/24[^:]*: }; send "$w\r" }
 }
 proc words_of {block} {
     set out {}
@@ -44,15 +44,15 @@ expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){7})} { set pass [join [wor
 expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 
-# The public files exist before share C is shown.
+# The public files exist before the paper share is shown.
 expect "Saved two PUBLIC files"
-if {![file exists $dir/record.hex] || ![file exists $dir/recovery-sheet.txt]} { fail "files not saved before share C" }
-expect -re {share C:\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set sharec [words_of $expect_out(1,string)] }
+if {![file exists $dir/record.hex] || ![file exists $dir/recovery-sheet.txt]} { fail "files not saved before the paper share" }
+expect -re {paper share \(this is share 3\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set sharec [words_of $expect_out(1,string)] }
 expect "type all 24 words back"; send "\r"
 
-# Full re-entry: a different (valid) share is refused and share C is shown again.
+# Full re-entry: a different (valid) share is refused and the paper share is shown again.
 type_words [concat [lrepeat 23 abandon] art]
-expect "is not the share C shown"
+expect "is not the paper share shown"
 expect "type it again."; send "\r"
 type_words $sharec
 expect "6/6 Backup made"
@@ -64,11 +64,11 @@ spawn $env(VAULT) restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect "1 or 2: "; send "2\r"
 expect "record.hex: "; send "$dir/record.hex\r"
-expect -ex {passphrase [y/n]: }; send "y\r"
-expect -ex {YubiKey and its PIN [y/n]: }; send "n\r"
-expect -ex {share C (24 words) [y/n]: }; send "y\r"
-type_words $sharec
+expect -ex {share 1: passphrase [y/n]: }; send "y\r"
+expect -ex {share 2: YubiKey and its PIN [y/n]: }; send "n\r"
+expect -ex {share 3: paper share (24 words) [y/n]: }; send "y\r"
 expect "exactly as written (hidden): "; send "$pass\r"
+type_words $sharec
 expect -re {Seed fingerprint: ([0-9a-f]{8})} {
     if {$expect_out(1,string) ne $fp} { fail "verify-only fingerprint $expect_out(1,string) is not $fp" }
 }
@@ -111,17 +111,20 @@ fn backup_then_verify_only_restore() {
     let transcript = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "{transcript}\n{}", String::from_utf8_lossy(&out.stderr));
 
-    let fp = epn_core::seed_fingerprint(&epn_core::words_to_entropy(SEED).unwrap());
+    let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(SEED).unwrap());
     let dir = work.join(transcript.rsplit_once("DIR=").unwrap().1.split_whitespace().next().unwrap());
     assert!(transcript.contains(&format!("FP={fp}")), "fingerprint shown is not the seed's");
     // The seed is never on screen (it is typed hidden), in backup or in verify-only restore.
     assert!(!transcript.contains("sausage"), "seed shown");
     // No restore command that puts secrets on a command line; the test step points to verify only.
-    assert!(!transcript.contains("SHARE_C_WORDS") && !transcript.contains("cast send"), "{transcript}");
+    assert!(!transcript.contains("cast send"), "{transcript}");
     assert!(transcript.contains("verify only"));
 
     let record_hex = std::fs::read_to_string(dir.join("record.hex")).unwrap();
     let record = epn_core::unhex(&record_hex).unwrap();
+    // The 2-of-3 layout (passphrase, YubiKey, paper): format version 2, 152 bytes.
+    let h = epn_core::record::parse_record(&record).unwrap();
+    assert_eq!((record[0], h.k, h.kinds.len(), record.len()), (2, 2, 3, 152));
     let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();
     for want in [
         "cast code <address>".to_string(),
@@ -129,12 +132,12 @@ fn backup_then_verify_only_restore() {
         format!("seed fingerprint: {fp}"),
         format!("record:           {}", record_hex.trim()),
         "credential:       Zm9vYmFy".to_string(),
-        "read -rs".to_string(),
+        "recover restore 0x".to_string(),
+        "--key 2=Zm9vYmFy".to_string(),
         "vault restore".to_string(),
     ] {
         assert!(sheet.contains(&want), "sheet lacks {want:?}:\n{sheet}");
     }
-    assert!(!sheet.contains("SHARE_C_WORDS"));
     assert!(!dir.join(".write-test").exists());
     std::fs::remove_dir_all(&work).unwrap();
 }

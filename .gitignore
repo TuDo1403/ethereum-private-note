@@ -2,6 +2,5 @@ target/
 .remember/
 .claude/settings.local.json
 .DS_Store
-out/
-cache/
 backup-*/
+.serena/
