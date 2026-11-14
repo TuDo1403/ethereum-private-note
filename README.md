@@ -73,6 +73,27 @@ record.
 
 ## Install
 
+### Prebuilt binaries
+
+Each [release](https://github.com/TuDo1403/ethereum-private-note/releases) has binaries for Linux
+and macOS, x86_64 and aarch64. Take the installer from the release you want (it installs that same
+release) and run it. It puts `vault`, `recover` and `publish` in `~/.local/bin` (set
+`EPN_INSTALL_DIR` to change that):
+
+```bash
+curl -fsSL https://github.com/TuDo1403/ethereum-private-note/releases/download/vX.Y.Z/install.sh | sh
+```
+
+The installer checks the download against the release's `SHA256SUMS`. That catches a corrupt
+download, not a tampered release, because both files come from the same place. To check that CI built
+the binaries from this repository, download the tarball and run
+`gh attestation verify epn-vX.Y.Z-<platform>.tar.gz --repo TuDo1403/ethereum-private-note`.
+If you would rather not pipe a script into a shell, download the tarball and `SHA256SUMS` from the
+release page and do the same checks by hand. For the machine that holds your backup, building from
+source (below) avoids trusting a prebuilt binary at all.
+
+### From source
+
 Requirements:
 
 - **Rust 1.100** (the tested toolchain; edition 2024).
@@ -445,8 +466,22 @@ cargo deny check                  # advisories, licences, sources (https://githu
 CI (`.github/workflows/ci.yml`) runs these on Linux and macOS, x86_64 and aarch64, and also checks
 that `vendor/` is exactly what `cargo vendor` produces from `Cargo.lock`. The toolchain is pinned in
 `rust-toolchain.toml`. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org)
-(`type(scope): subject`, scopes in `.commitlintrc.yml`); the PR check enforces it. Pushing a tag
-`vX.Y.Z` runs `release.yml`, which publishes the binaries with checksums and build provenance.
+(`type(scope): subject`, scopes in `.commitlintrc.yml`); the PR check enforces it.
+
+### Releasing
+
+All four crates share one version, `[workspace.package] version` in the root `Cargo.toml`.
+
+1. In a PR, set that version, run `cargo build --offline` so `Cargo.lock` follows, and merge it.
+2. Tag the merge commit and push the tag:
+
+   ```bash
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+`release.yml` fails if the tag differs from the Cargo version. Otherwise it builds the binaries on
+each platform and publishes them, `install.sh` (stamped with the tag) and `SHA256SUMS` as a GitHub
+release with build provenance. "Run workflow" does the builds without publishing, as a dry run.
 
 The test profile builds with `opt-level = 3` because the real-parameter vector runs Argon2id at
 1 GiB. The anvil tests in `publish/` skip if `anvil` is not installed; the `vault` test skips if
