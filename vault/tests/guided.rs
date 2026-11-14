@@ -17,6 +17,8 @@ proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
 # echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
 proc secret {s} {
+    # spawn sets spawn_out at the top level; without this the stty read always fails and only the 10 s cap waits.
+    global spawn_out
     for {set i 0} {$i < 200} {incr i} {
         if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
         sleep 0.05
