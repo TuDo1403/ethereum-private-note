@@ -34,6 +34,11 @@ enum Cmd {
     Backup,
     /// Restore a seed, or verify a backup without ever showing the seed
     Restore,
+    /// Put share 2 of a 1Password backup into 1Password (online; only share 2 is typed)
+    OpStore {
+        /// The backup's recovery-sheet.txt, which names the account and the item
+        sheet: String,
+    },
 }
 
 fn run() -> Result<(), String> {
@@ -44,6 +49,7 @@ fn run() -> Result<(), String> {
     let backup = match cli.command {
         Some(Cmd::Backup) => true,
         Some(Cmd::Restore) => false,
+        Some(Cmd::OpStore { sheet }) => return backup::op_store(&sheet),
         None => {
             clear();
             choose(

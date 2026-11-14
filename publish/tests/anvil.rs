@@ -626,6 +626,67 @@ async fn binary_ctrl_c_with_stuck_deploy_sweep_replaces_it() {
     );
 }
 
+/// Funds arrived, the deploy is stuck, and the fee quote jumps far above the sanity cap before the sweep.
+/// The balance cannot pay for the sweep, so the run must fail AND print the key: a sweep that reports
+/// "nothing to sweep" would let the run forget the only key to that ETH.
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_unsweepable_balance_keeps_the_key() {
+    let Some(anvil) = start_anvil().await else {
+        return;
+    };
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    let file = record_file(&record(13), "unsweepable");
+    let mut bin = Bin::spawn(&[&anvil.1, &file, &REFUND.to_string()]);
+    let (sender, wei) = bin.funding_request();
+
+    automine(&anvil.1, false).await;
+    send_eth_and_mine(&anvil.1, sender, wei).await;
+    bin.wait_for("deploy tx");
+    spike_base_fee(&anvil.1, 5_000_000_000_000).await; // 5000 gwei: the deploy stays out of this block
+    bin.interrupt();
+    let (ok, out) = bin.finish();
+
+    assert!(
+        !ok && out.contains("does not cover the sweep's fee"),
+        "{out}"
+    );
+    assert_eq!(
+        printed_key(&out).expect("key must be printed").address(),
+        sender,
+        "{out}"
+    );
+    assert_eq!(
+        p.get_balance(sender).await.unwrap(),
+        wei,
+        "nothing was spent: {out}"
+    );
+}
+
+/// An RPC that accepts connections and never answers must not hold the run forever: every request is
+/// bounded, so the run fails instead of hanging.
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_rpc_does_not_hang_the_run() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let held: Vec<TcpStream> = listener.incoming().flatten().collect(); // accept, never reply
+        drop(held);
+    });
+    let start = Instant::now();
+    let res = tokio::time::timeout(
+        Duration::from_secs(60),
+        run(&opts(&url), &record(1), |_: &FundRequest| {}),
+    )
+    .await;
+    let err = res.expect("run hung on a stalled RPC").unwrap_err();
+    assert!(err.contains("chain id"), "{err}");
+    assert!(
+        start.elapsed() < Duration::from_secs(40),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 /// Nonce-0 race: the run gives up on a deploy it could not see confirmed (here: RPC down, then Ctrl-C),
 /// but the deploy WAS mined at nonce 0. The sweep must move on to nonce 1, and the run must still say
 /// the record is stored and print the sheet with its address and record id.

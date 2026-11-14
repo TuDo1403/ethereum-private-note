@@ -7,9 +7,10 @@ use alloy::{
     network::TransactionBuilder,
     primitives::{Address, B256, U256, utils::format_ether},
     providers::{Provider, ProviderBuilder},
+    rpc::client::RpcClient,
     rpc::types::{TransactionReceipt, TransactionRequest},
     signers::local::PrivateKeySigner,
-    transports::http::reqwest::Url,
+    transports::http::reqwest::{self, Url},
 };
 use epn_core::{record::parse_record as check_record, record_id};
 use std::cell::Cell;
@@ -42,6 +43,8 @@ const PER_CONFIRMATION: Duration = Duration::from_secs(30);
 const READBACK_TRIES: u32 = 5;
 const READBACK_DELAY: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_secs(2);
+/// Upper bound on any single RPC request (connect + response).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const SWEEP_TRIES: u32 = 6;
 /// How long one sweep tx may stay unmined before it is re-sent with a higher fee.
 const SWEEP_WAIT: Duration = Duration::from_secs(90);
@@ -205,6 +208,18 @@ fn scrub(mut msg: String, secrets: &[String]) -> String {
     msg
 }
 
+/// An HTTP RPC client whose every request gives up after `REQUEST_TIMEOUT`. Deadlines are only checked
+/// between calls, so without this one stalled request (a server that accepts and never answers) would
+/// hold the funding wait, the confirmation wait or the sweep forever.
+fn http_client(url: &str) -> Result<RpcClient, String> {
+    let url = Url::parse(url).map_err(e("bad RPC URL"))?;
+    let http = reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(e("HTTP client"))?;
+    Ok(RpcClient::new_http_with_client(http, url))
+}
+
 /// Last resort for ETH the sweep could not return: if dropped while `armed`, prints the throwaway key on
 /// stderr. Armed from the moment the funding address is shown until the funds have arrived AND the sweep
 /// has finished; dropping also happens on a panic or when the future is cancelled. The key only ever
@@ -272,13 +287,9 @@ async fn run(
     let rescue_signer = signer.clone();
     let provider = ProviderBuilder::new()
         .wallet(signer)
-        .connect(opts.rpc_url)
-        .await
-        .map_err(e("cannot connect to RPC"))?;
+        .connect_client(http_client(opts.rpc_url)?);
     let reader = ProviderBuilder::new()
-        .connect(opts.verify_rpc_url.unwrap_or(opts.rpc_url))
-        .await
-        .map_err(e("cannot connect to verify RPC"))?;
+        .connect_client(http_client(opts.verify_rpc_url.unwrap_or(opts.rpc_url))?);
 
     let chain_id = provider.get_chain_id().await.map_err(e("chain id"))?;
     if chain_id == 0 {
@@ -425,7 +436,7 @@ async fn run(
     // new one may abandon the sweep.
     INTERRUPTED.store(false, Ordering::SeqCst);
     let swept = tokio::select! {
-        r = sweep(&provider, sender, refund, sent.get().unwrap_or((0, 0)), secrets) => r,
+        r = sweep(&provider, sender, refund, sent.get().unwrap_or((0, 0)), opts.allow_high_fees, secrets) => r,
         () = interrupted() => Err("interrupted again during the sweep".to_string()),
     };
     // Once the funds have arrived and the sweep has finished, nothing more is expected at `sender` and
@@ -617,7 +628,8 @@ fn bump((max_fee, tip): (u128, u128)) -> (u128, u128) {
     )
 }
 
-/// Send everything above the sweep's own fee to `refund`; returns the wei sent (0 = not worth a tx).
+/// Send everything above the sweep's own fee to `refund`; returns the wei sent (0 only when `sender` is
+/// empty). A non-zero balance that cannot be swept is an error, so the caller keeps (prints) the key.
 ///
 /// The sweep must work even when the deploy is stuck in the mempool. So it uses the latest MINED nonce and
 /// balance (not the pending nonce, which would queue it behind the stuck deploy while its value counts on
@@ -631,6 +643,7 @@ async fn sweep(
     sender: Address,
     refund: Address,
     sent: (u128, u128),
+    allow_high: bool,
     secrets: &[String],
 ) -> Result<U256, String> {
     let mut floor = bump(sent);
@@ -660,14 +673,29 @@ async fn sweep(
                 continue;
             }
         };
-        let (max_fee, tip) = (quoted_fee.max(floor.0), quoted_tip.max(floor.1));
+        // The same sanity cap as the funding request: an inflated quote must not size a reserve that eats
+        // the balance (it would be left at `sender`, whose key is then forgotten). Never below `floor`,
+        // which must outbid a stuck deploy; a capped fee too low for the chain just fails to mine and is
+        // retried, ending in an error that keeps the key.
+        let quoted_fee = if allow_high {
+            quoted_fee
+        } else {
+            quoted_fee.min(MAX_FEE_CAP)
+        };
+        let max_fee = quoted_fee.max(floor.0);
+        let tip = quoted_tip.max(floor.1).min(max_fee);
         let reserve = U256::from(SWEEP_GAS) * U256::from(max_fee) * U256::from(reserve_mul);
+        if balance.is_zero() {
+            log!("nothing to sweep: {sender} is empty");
+            return Ok(U256::ZERO);
+        }
         if balance <= reserve {
-            log!(
-                "nothing to sweep: {} at {sender} does not cover the sweep's fee",
+            // Not Ok(0): that would let the caller forget the only key to this balance.
+            last = format!(
+                "{} at {sender} does not cover the sweep's fee at {max_fee} wei/gas",
                 amount(balance)
             );
-            return Ok(U256::ZERO);
+            continue;
         }
         let value = balance - reserve;
         let tx = TransactionRequest::default()

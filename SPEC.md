@@ -109,6 +109,8 @@ word") is not part of this backup.
   `1password: share 2 op://<vault>/<item>/password account <account>`; the account is always given,
   because with several accounts signed in `op` would otherwise pick one. Such a share must sit in a
   personal account, never a work one, and not in the same account as another factor of the record.
+  `op` needs 1Password's servers, so `vault backup` (offline) only shows the share for a temporary
+  paper; `vault op-store <sheet>` stores it later on an online machine that never holds another factor.
 
 Using a YubiKey also needs its credential id (base64, printed by `vault backup` and on the recovery
 sheet). It is not secret and is useless without the key. If the sheet is lost it can be listed from the
