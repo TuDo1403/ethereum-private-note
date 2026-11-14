@@ -16,6 +16,8 @@ mod prompt;
 mod restore;
 #[allow(dead_code)] // used from Task 6
 mod score;
+#[allow(dead_code)] // used from Task 6
+mod sheet;
 
 use clap::{Parser, Subcommand};
 use prompt::{choose, clear};

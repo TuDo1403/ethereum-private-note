@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const PASS_X: u8 = 1;
-const KEY_X: u8 = onepassword::X; // the YubiKey and the 1Password share are alternatives at x = 2
+const KEY_X: u8 = 2; // the YubiKey and the 1Password share are alternatives at x = 2
 const PAPER_X: u8 = 3;
 
 /// The second factor: a YubiKey (its credential id) or 1Password (the account and vault share 2 goes into).
@@ -94,12 +94,11 @@ fn sheet(record: &[u8], second: &Second, op_ref: &str, fingerprint: &str) -> Str
         Second::OnePassword { account, .. } => (
             format!(
                 "{}   (1Password asks for Touch ID)",
-                onepassword::sheet_line(onepassword::X, op_ref, account)
+                onepassword::sheet_line(KEY_X, op_ref, account)
             ),
             String::new(),
             format!(
-                "pass <passphrase>   paper {} <words from `op read --account {account} <reference>`>   paper {PAPER_X} <24 words>",
-                onepassword::X
+                "pass <passphrase>   paper {KEY_X} <words from `op read --account {account} <reference>`>   paper {PAPER_X} <24 words>"
             ),
         ),
     };
@@ -326,7 +325,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     // Saved now, before any share leaves this process: once papers exist, the record they belong to must
     // be on disk. The 1Password item's name is fixed by the record id, so the sheet can name it.
     let fingerprint = seed_fingerprint(&entropy);
-    let title = format!("epn-share-{}-{}", onepassword::X, record_id(&record));
+    let title = onepassword::title(KEY_X, &record_id(&record));
     let op_ref = match &second {
         Second::OnePassword { vault, .. } => onepassword::reference(vault, &title),
         Second::YubiKey(_) => String::new(),
@@ -360,7 +359,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     clear();
 
     if let Second::OnePassword { .. } = &second {
-        let x = onepassword::X;
+        let x = KEY_X;
         let words = paper_words(&paper, x);
         step(
             5,
@@ -401,7 +400,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
          factors in turn. Each must show fingerprint {fingerprint}. The seed is never shown."
     )];
     if let Second::OnePassword { .. } = &second {
-        let x = onepassword::X;
+        let x = KEY_X;
         next[0].push_str(&format!("\n     For share {x}, answer no to reading it from 1Password and type the temporary paper."));
         next.push(format!(
             "on your online machine with 1Password (never this one), put share {x} into 1Password:\n       \
@@ -430,7 +429,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
 /// paper and stored in the item the recovery sheet names, then read back through the path a restore
 /// uses. Only share 2 is ever on this machine, which is why it may be online.
 pub fn op_store(sheet_path: &str) -> Result<(), String> {
-    let x = onepassword::X;
+    let x = KEY_X;
     let text = std::fs::read_to_string(sheet_path)
         .map_err(|e| format!("cannot read {sheet_path}: {e}"))?;
     let r = onepassword::sheet_references(&text)

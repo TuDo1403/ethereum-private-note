@@ -13,8 +13,6 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use zeroize::Zeroizing;
 
-/// The share number `vault` gives the 1Password factor (the YubiKey's place in the 2-of-3 layout).
-pub const X: u8 = 2;
 /// The recovery-sheet line that names the item; `vault restore` reads it back from there.
 const SHEET_PREFIX: &str = "1password:";
 
@@ -83,6 +81,11 @@ pub fn check_account(s: &str) -> Result<(), String> {
 
 pub fn reference(vault: &str, title: &str) -> String {
     format!("op://{vault}/{title}/password")
+}
+
+/// The item title for share `x` of the record with this id; the id keeps two backups' items apart.
+pub fn title(x: u8, record_id: &str) -> String {
+    format!("epn-share-{x}-{record_id}")
 }
 
 /// (vault, item title) of a reference made by `reference`.
@@ -180,6 +183,7 @@ mod tests {
 
     #[test]
     fn names_and_sheet_lines() {
+        assert_eq!(title(5, "ab12"), "epn-share-5-ab12");
         assert!(check_name("v", "Private").is_ok());
         for bad in ["", "a\"b", "a/b", "a\nb"] {
             assert!(check_name("v", bad).is_err(), "{bad:?}");
