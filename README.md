@@ -108,7 +108,9 @@ the offline machine you will use.
   your 1Password account and is as safe as that account, not tied to one device. Use a **personal**
   account, never a work one (its admins can reach it, and you lose it with the job); `vault` asks for
   the account explicitly and passes it to every `op` call. **Never keep the passphrase or the paper
-  share in that same account**, or one breach of it gives two factors.
+  share in that same account**, or one breach of it gives two factors. The `op` command needs
+  1Password's servers, so the offline backup never runs it: share 2 goes on a temporary paper and is
+  put into 1Password afterwards, on your online machine, with `vault op-store`.
 - **Paper and a pen** for the passphrase and the paper share. Steel plates if you want fire/water resistance.
 - **An online machine** for `publish` (later, no secrets involved).
 - **A wallet with a little ETH** on the chain you choose, to fund the throwaway publishing address.
@@ -150,10 +152,9 @@ steps:
    then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it goes
    on the recovery sheet. Or pick 1Password (Touch ID) and name the personal account (sign-in
    address or email, see `op account list`) and a vault in it (see `op vault list --account <account>`).
-   After step 4, share 2 is stored there as the item `epn-share-2-<record id>` (the words go
-   to `op` through stdin, never the command line or a file) and read back once to check it; 1Password
-   asks for Touch ID. The sheet names the item's `op://` reference, and `vault restore` offers to read it
-   from 1Password instead of typing it.
+   Nothing is sent to 1Password during the backup: the sheet names the item `epn-share-2-<record id>`
+   that `vault op-store` creates later (see *Putting share 2 into 1Password*), and `vault restore`
+   offers to read it from there instead of typing it.
 2. **Seed.** Type your 12–24 seed words (hidden), then type them again: both entries must give the same
    seed, because a typo that is another BIP39 word passes the checksum surprisingly often (1 in 16 for
    12 words). The **seed fingerprint** (8 hex digits, see `SPEC.md`) is shown; note it. Only the entropy
@@ -167,7 +168,9 @@ steps:
    says so: destroy the papers of that run and start again.
 5. **Paper share.** 24 words are shown once. Write them on a *separate* paper and label it *"backup
    share 3, not a wallet"*. Then type all 24 back (hidden); a mismatch shows the share again so you can
-   correct the paper.
+   correct the paper. With 1Password, share 2 is shown the same way next: write it on a **temporary**
+   paper labelled *"share 2, for 1Password, destroy after `vault op-store`"*, kept apart from the
+   other two papers (any two of the three restore the seed), and type it back.
 6. **Next steps** are printed: test the papers with a verify-only restore, publish the record, fill in
    the recovery sheet.
 
@@ -177,6 +180,21 @@ for the chain id and the record's address. Print it, together with `SPEC.md`, an
 of `record.hex` and these locators) in the storage place of every factor paper too.
 
 Then clear the terminal scrollback, and shut down the offline machine (or reboot the live OS).
+
+### Putting share 2 into 1Password
+
+Only with the 1Password option, after the papers are tested (see *Testing the backup*). On your
+**online** machine with the 1Password app, never the machine that saw the seed:
+
+```bash
+./vault op-store backup-<timestamp>/recovery-sheet.txt
+```
+
+It reads the account and item name from the sheet (public), asks for share 2 from the temporary paper,
+twice, and stores it (through stdin, never the command line or a file); 1Password asks for Touch ID.
+It then reads the item back and compares. Running it again finds the item instead of making a
+duplicate. Then **destroy the temporary paper** (shred or burn it). Only share 2 is ever typed on this
+machine.
 
 ## Publishing the record on chain
 
@@ -224,6 +242,9 @@ The output must be `0x00` followed by the contents of `record.hex` (without its 
 2. passphrase + paper share
 3. YubiKey + paper share
 
+With 1Password, share 2 is still on its temporary paper at this point: answer **no** when `vault`
+offers to read it from 1Password (that needs the network) and type the paper.
+
 Verify only prints the seed fingerprint instead of the seed, so a test never puts your seed on screen.
 It must equal the fingerprint on the recovery sheet. `vault` already checked all three pairs against
 the in-memory values; this test checks what you actually **wrote on paper**.
@@ -234,7 +255,8 @@ YubiKey while you still have the other two.
 ## Restoring
 
 You need the record (from the sheet, `record.hex`, or the chain) and any two factors. Do it offline:
-the seed is printed on screen.
+the seed is printed on screen. Reading share 2 from 1Password needs the network, so offline, open the
+item in the 1Password app on another device and type its 24 words when `vault` asks.
 
 ### Guided: `vault restore`
 

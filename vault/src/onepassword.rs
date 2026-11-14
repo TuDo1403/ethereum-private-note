@@ -21,6 +21,11 @@ pub const SHEET_PREFIX: &str = "1password:";
 fn run(args: &[&str], input: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let mut child = Command::new("op")
         .args(args)
+        // These authenticate `op` as a service account or a Connect server and take precedence over
+        // `--account`: an inherited work token would silently store (and read back) the share there.
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OP_CONNECT_HOST")
+        .env_remove("OP_CONNECT_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit()) // op's own messages ("unlock 1Password", errors) must reach the user
@@ -51,6 +56,15 @@ pub fn check_account(s: &str) -> Result<(), String> {
 
 pub fn reference(vault: &str, title: &str) -> String {
     format!("op://{vault}/{title}/password")
+}
+
+/// (vault, item title) of a reference made by `reference`.
+pub fn split_reference(r: &str) -> Result<(&str, &str), String> {
+    let parts = r.strip_prefix("op://").and_then(|s| s.strip_suffix("/password")).and_then(|s| s.split_once('/'));
+    let (vault, title) = parts.ok_or_else(|| format!("not a 1Password reference made by vault: {r}"))?;
+    check_name("vault name", vault)?;
+    check_name("item title", title)?;
+    Ok((vault, title))
 }
 
 /// Stores `words` as a new Password item and returns its `op://` reference (not secret).
@@ -93,17 +107,17 @@ pub fn sheet_line(x: u8, reference: &str, account: &str) -> String {
     format!("{SHEET_PREFIX:<18}share {x} {reference} account {account}")
 }
 
-/// Every share a recovery sheet names on `1password:` lines (see `sheet_line`).
+/// Every share a recovery sheet names on `1password:` lines (see `sheet_line`). Vault and item names may
+/// hold spaces, so the reference is everything between the share number and the last " account ".
 pub fn sheet_references(sheet: &str) -> Vec<SheetRef> {
     sheet
         .lines()
         .filter_map(|l| {
-            let mut t = l.strip_prefix(SHEET_PREFIX)?.split_whitespace();
-            let (Some("share"), Some(x), Some(r), Some("account"), Some(a)) = (t.next(), t.next(), t.next(), t.next(), t.next())
-            else {
-                return None;
-            };
-            Some(SheetRef { x: x.parse().ok()?, reference: r.to_string(), account: a.to_string() })
+            let rest = l.strip_prefix(SHEET_PREFIX)?.trim_start().strip_prefix("share ")?;
+            let (x, rest) = rest.split_once(' ')?;
+            let (reference, after) = rest.rsplit_once(" account ")?;
+            let account = after.split_whitespace().next()?;
+            Some(SheetRef { x: x.parse().ok()?, reference: reference.to_string(), account: account.to_string() })
         })
         .collect()
 }
@@ -122,6 +136,12 @@ mod tests {
         let refs = sheet_references(&format!("x\n{line}   (read with `op read`)\n"));
         assert_eq!(refs.len(), 1);
         assert_eq!((refs[0].x, refs[0].reference.as_str(), refs[0].account.as_str()), (2, "op://Personal/epn-share-2-ab/password", "my.1password.com"));
+        // Spaces in vault and item names (check_name allows them) survive the round trip.
+        let spaced = "op://Personal Vault/my share 2/password";
+        let refs = sheet_references(&format!("{}   (1Password asks for Touch ID)\n", sheet_line(2, spaced, "me@x.com")));
+        assert_eq!((refs.len(), refs[0].reference.as_str(), refs[0].account.as_str()), (1, spaced, "me@x.com"));
+        assert_eq!(split_reference(spaced), Ok(("Personal Vault", "my share 2")));
+        assert!(split_reference("op://a/b/c/password").is_err() && split_reference("op://a/password").is_err());
         // A line without its account is not trusted: restore then asks rather than letting op guess.
         assert!(sheet_references("1password: share 2 op://Personal/x/password\n").is_empty());
         for bad in ["", "my 1password", "a;b"] {

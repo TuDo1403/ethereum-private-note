@@ -59,7 +59,7 @@ expect "type all 24 words back"; send "\r"
 
 # Full re-entry: a different (valid) share is refused and the paper share is shown again.
 type_words [concat [lrepeat 23 abandon] art]
-expect "is not the paper share shown"
+expect "is not the share shown"
 expect "type it again."; send "\r"
 type_words $sharec
 expect "6/6 Backup made"
@@ -83,8 +83,9 @@ expect eof
 puts "\nDIR=$dir FP=$fp"
 "#;
 
-/// Share 2 in 1Password: backup, then a verify-only restore from the 1Password share and the paper share
-/// (no passphrase, so no Argon2 in the restore).
+/// Share 2 in 1Password: an offline backup that never runs `op` and shows share 2 for a temporary paper,
+/// then `vault op-store` (twice: the second run must find the item, not duplicate it), then a verify-only
+/// restore from the 1Password share and the paper share (no passphrase, so no Argon2 in the restore).
 const SCRIPT_1PASSWORD: &str = r#"
 spawn $env(VAULT) backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
@@ -102,11 +103,32 @@ expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){7})} { set pass [join [wor
 expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 expect "Saved two PUBLIC files"
-expect -re {Share 2 is in 1Password as (op://[^ ]+) } { set ref $expect_out(1,string) }
 expect -re {paper share \(this is share 3\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set sharec [words_of $expect_out(1,string)] }
 expect "type all 24 words back"; send "\r"
 type_words $sharec
+expect -re {share 2 for 1Password \(TEMPORARY paper\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set shareb [words_of $expect_out(1,string)] }
+expect "type all 24 words back"; send "\r"
+type_words $shareb
 expect "6/6 Backup made"
+expect "vault op-store $dir/recovery-sheet.txt"
+expect eof
+if {[file exists "$env(WORK)/op-argv.log"]} { fail "the offline backup ran op" }
+
+spawn $env(VAULT) op-store $dir/recovery-sheet.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+type_words $shareb
+expect "Again"
+type_words $shareb
+expect -re {Share 2 is in 1Password as (op://[^ ]+) } { set ref $expect_out(1,string) }
+expect "destroy the temporary share-2 paper"
+expect eof
+
+spawn $env(VAULT) op-store $dir/recovery-sheet.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+type_words $shareb
+expect "Again"
+type_words $shareb
+expect "already in 1Password"
 expect eof
 
 spawn $env(VAULT) restore
@@ -202,8 +224,10 @@ fn backup_then_verify_only_restore() {
 }
 
 /// A fake `op`: `item create ... -` keeps the template's value under its title, `read ... <ref>` returns
-/// it. Every argv is logged, so the test can prove the share never travels on a command line.
+/// it. Every argv is logged, so the test can prove the share never travels on a command line. It refuses
+/// to run with a service-account or Connect token in its environment: those would override `--account`.
 const FAKE_OP: &str = r#"echo "$*" >> "$WORK/op-argv.log"
+[ -n "$OP_SERVICE_ACCOUNT_TOKEN$OP_CONNECT_HOST$OP_CONNECT_TOKEN" ] && exit 9
 case "$1" in
   item) json=$(cat)
         title=$(printf '%s' "$json" | sed -n 's/.*"title":"\([^"]*\)".*/\1/p')
@@ -216,7 +240,7 @@ esac"#;
 
 #[test]
 fn backup_with_1password_then_verify_only_restore() {
-    let Some((work, transcript)) = run_script("1password", SCRIPT_1PASSWORD, &[("op", FAKE_OP)], &[("SEED", SEED)]) else { return };
+    let Some((work, transcript)) = run_script("1password", SCRIPT_1PASSWORD, &[("op", FAKE_OP)], &[("SEED", SEED), ("OP_SERVICE_ACCOUNT_TOKEN", "ops_work"), ("OP_CONNECT_TOKEN", "x")]) else { return };
     let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(SEED).unwrap());
     assert!(transcript.contains(&format!("FP={fp}")), "fingerprint shown is not the seed's");
     assert!(!transcript.contains("sausage"), "seed shown");
@@ -238,7 +262,7 @@ fn backup_with_1password_then_verify_only_restore() {
     assert!(!argv.contains(&start.join(" ")), "a share went through op's argv:\n{argv}");
     // Every op call names the account: with a work account also signed in, op must never pick one itself.
     assert!(argv.lines().count() >= 3 && argv.lines().all(|l| l.contains("--account my.1password.com ")), "{argv}");
-    assert!(argv.contains("item create --account my.1password.com --vault Personal -"), "{argv}");
+    assert_eq!(argv.matches("item create --account my.1password.com --vault Personal -").count(), 1, "{argv}");
     assert!(argv.contains(&format!("read --account my.1password.com --no-newline {reference}")), "{argv}");
 
     let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();

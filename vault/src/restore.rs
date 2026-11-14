@@ -47,6 +47,14 @@ fn label(kind: Kind, in_1password: bool) -> &'static str {
     }
 }
 
+/// Offer to read share `x` from 1Password. `op` needs the network, so an offline restore declines and
+/// types the words instead.
+fn read_from_1password(x: u8, r: &onepassword::SheetRef) -> Result<bool, String> {
+    println!("Share {x} is in 1Password. Reading it needs the network; offline, answer no and type the 24 words");
+    println!("the 1Password app shows on another device.");
+    yes(&format!("Read share {x} from 1Password ({}, account {}); it asks for Touch ID?", r.reference, r.account))
+}
+
 pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     clear();
     println!("Restore your seed. You need the record and enough of its factors (2 of 3 for a backup made by `vault`).\n");
@@ -101,7 +109,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
             println!();
             let secret = match (kind(x), op_ref(x)) {
                 (Kind::Passphrase, _) => ask_hidden("passphrase, exactly as written (hidden): ")?,
-                (_, Some(r)) if yes(&format!("Read share {x} from 1Password ({}, account {}); it asks for Touch ID?", r.reference, r.account))? => {
+                (_, Some(r)) if read_from_1password(x, r)? => {
                     onepassword::read(&r.account, &r.reference)?
                 }
                 _ => enter_paper_share(x)?,
