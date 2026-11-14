@@ -89,6 +89,11 @@ mod tests {
     #[test]
     fn the_list_has_2048_words_and_round_trips() {
         assert_eq!(WORDS.len(), 2048);
+        // The canonical BIP39 English list, byte for byte: one wrong word would corrupt seeds silently.
+        assert_eq!(
+            crate::hex(Sha256::digest(include_str!("../wordlist.txt"))),
+            "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda"
+        );
         let seed = "legal winner thank year wave sausage worth useful legal winner thank yellow";
         assert_eq!(entropy_to_words(&words_to_entropy(seed).unwrap()), seed);
         assert_eq!(new_passphrase(7).split(' ').count(), 7);

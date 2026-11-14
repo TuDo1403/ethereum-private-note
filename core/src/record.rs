@@ -17,9 +17,9 @@ const MAX_N: usize = 5;
 /// machine cannot allocate.
 pub const ARGON_M_KIB: u32 = 1 << 20;
 pub const ARGON_T: u8 = 3;
-// m and t come from the record, i.e. from untrusted input. 2 GiB is twice the real 1 GiB; each pass costs
-// as much time as the whole 1 GiB hash, and the real t is 3. 16 leaves room to raise it later and still
-// bounds the time a forged record can burn.
+// m and t come from the record, i.e. from untrusted input. The time is about m * t: the worst record
+// accepted (2 GiB, t = 16) costs about 11 times the real one (1 GiB, t = 3). That leaves room to raise
+// the real cost later and still bounds the time a forged record can burn.
 const MAX_M_KIB: u32 = 1 << 21;
 const MAX_T: u8 = 16;
 /// version, m, t, salt, k, n; the kinds follow, one byte per share.

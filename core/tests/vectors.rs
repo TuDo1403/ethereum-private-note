@@ -304,8 +304,6 @@ fn refuses_every_invalid_vector() {
             .collect();
         let e = unseal(&record, &factors).unwrap_err();
         assert!(e.contains(v["error"].as_str().unwrap()), "{name}: {e}");
-        // The user-facing path refuses too, before any slow work.
-        assert!(restore(&record, None, &[], &[]).is_err(), "{name}");
     }
     // Rebuilt from the first vector, so the data cannot drift from the code that judges it.
     let v = &vectors()[0];

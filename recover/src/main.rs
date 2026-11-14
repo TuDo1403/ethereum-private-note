@@ -129,6 +129,9 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
         .chain(keys.iter().map(|k| k.0))
         .collect();
     record::check_factors(&record, f.pass.is_some(), &xs, &f.paper)?;
+    for (_, cred) in &keys {
+        fido::check_cred_id(cred)?;
+    }
     for (x, cred) in keys {
         eprintln!("Enter the PIN and touch the YubiKey that is share {x}.");
         f.hardware

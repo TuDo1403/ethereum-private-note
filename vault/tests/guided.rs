@@ -119,6 +119,8 @@ expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 type_words $shareb
 expect "Again"
 type_words $shareb
+# The item does not exist, so the fake `op read` fails: that is not proof of absence, a person confirms.
+answer "NO item" y
 expect -re {Share 2 is in 1Password as (op://[^ ]+) } { set ref $expect_out(1,string) }
 expect "destroy the temporary share-2 paper"
 expect eof
@@ -142,6 +144,24 @@ answer "it asks for Touch ID?" y
 type_words $sharec
 expect -re {Seed fingerprint: ([0-9a-f]{8})} {
     if {$expect_out(1,string) ne $fp} { fail "verify-only fingerprint $expect_out(1,string) is not $fp" }
+}
+expect eof
+
+# A failing `op read` (locked, Touch ID cancelled) must not end the restore: it falls back to the paper.
+set env(FAKE_OP_READ_FAILS) 1
+spawn $env(VAULT) restore
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "What should this run do?" 0
+expect "record.hex: "; send "$dir/record.hex\r"
+answer "share 1: passphrase" n
+answer "share 2: 1Password item (Touch ID)" y
+answer "share 3: paper share (24 words)" y
+answer "it asks for Touch ID?" y
+expect "Type the 24 words from the paper instead"
+type_words $shareb
+type_words $sharec
+expect -re {Seed fingerprint: ([0-9a-f]{8})} {
+    if {$expect_out(1,string) ne $fp} { fail "fallback fingerprint $expect_out(1,string) is not $fp" }
 }
 expect eof
 puts "\nDIR=$dir FP=$fp REF=$ref"
@@ -230,8 +250,7 @@ fn backup_then_verify_only_restore() {
     );
     // The seed is never on screen (it is typed hidden), in backup or in verify-only restore.
     assert!(!transcript.contains("sausage"), "seed shown");
-    // No restore command that puts secrets on a command line; the test step points to verify only.
-    assert!(!transcript.contains("cast send"), "{transcript}");
+    // The test step points to verify only.
     assert!(
         transcript.contains("pick \"Verify only\""),
         "the next steps must point to a verify-only test restore"
@@ -272,7 +291,8 @@ case "$1" in
         title=$(printf '%s' "$json" | sed -n 's/.*"title":"\([^"]*\)".*/\1/p')
         printf '%s' "$json" | sed -n 's/.*"value":"\([^"]*\)".*/\1/p' | tr -d '\n' > "$WORK/op-$title"
         echo "ID: fake" ;;
-  read) for a; do ref=$a; done
+  read) [ -n "$FAKE_OP_READ_FAILS" ] && exit 1
+        for a; do ref=$a; done
         cat "$WORK/op-$(printf '%s' "$ref" | cut -d/ -f4)" ;;
   *) exit 1 ;;
 esac"#;

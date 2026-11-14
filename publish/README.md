@@ -31,6 +31,9 @@ is not installed).
   funding timeout, partial funds are swept back too, and the leftover dust is reported.
 - **Ctrl-C, SIGTERM and closing the terminal (SIGHUP)** stop the run and sweep before exiting. A second Ctrl-C
   during the sweep abandons it.
+- **What it cannot catch:** SIGKILL, an out-of-memory kill, power loss or sleep end the process without
+  printing the key (the signal handling is Unix only, and with SIGHUP the terminal may already be gone).
+  The RPC replies are bounded by a 20 s timeout but not by size, and redirects are refused.
 - **The sweep replaces a stuck deploy.** It uses the latest *mined* nonce and balance, fees at least 12.5 %
   above the deploy's, and a value that leaves room for its own fee. It retries (re-reading the chain each
   time) on "nonce too low", an underpriced replacement, a sweep that stays unmined for 90 s (fee raised

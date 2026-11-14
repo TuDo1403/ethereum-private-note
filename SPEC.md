@@ -155,7 +155,7 @@ order, blank lines ignored:
 
     pass <passphrase>          the passphrase: everything after the first space, not trimmed
     paper <X> <24 words>       the paper share printed as share X
-    hw <X> <64 hex digits>     a hardware secret as hex, instead of --key
+    hw <X> <64 hex digits>     a hardware secret as hex, instead of --key (a 0x prefix and capitals are fine)
 
 Run the command alone and type the factor lines into its stdin, then Ctrl-D (they reach the program, not
 shell history, but they are visible on screen), and **never put a factor inside a command line**: the
