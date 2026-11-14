@@ -18,6 +18,12 @@ DEST="${EPN_INSTALL_DIR:-$HOME/.local/bin}"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 
+# We cd into a temp dir below, so a relative destination would resolve there and be deleted.
+case "$DEST" in
+  /*) ;;
+  *) DEST="$PWD/$DEST" ;;
+esac
+
 case "$VERSION" in
   @*) die "no version stamped: use the install.sh from a release page, or set EPN_VERSION=vX.Y.Z" ;;
 esac

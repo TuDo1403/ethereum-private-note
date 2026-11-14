@@ -82,6 +82,31 @@ pub fn score(layout: &Layout, places: Option<&[String]>) -> Score {
             }
         }
     }
+    // 1Password shares in one account are one place to a thief and to loss: losing that account (locked out,
+    // deleted) loses them all. The account is in the setup, so this applies with places unknown too.
+    // Accounts are ASCII (check_account).
+    let account = |i: usize| match &layout.shares[i].kind {
+        ShareKind::OnePassword { account, .. } => Some(account.as_str()),
+        _ => None,
+    };
+    let mut lost: Vec<&str> = Vec::new();
+    for first in (0..n).filter_map(account) {
+        if lost.iter().any(|a| a.eq_ignore_ascii_case(first)) {
+            continue;
+        }
+        lost.push(first);
+        let here: Vec<usize> = (0..n)
+            .filter(|&i| account(i).is_some_and(|a| a.eq_ignore_ascii_case(first)))
+            .collect();
+        if n > k && here.len() > n - k {
+            loss_weak = true;
+            warnings.push(format!(
+                "losing the 1Password account {first} leaves {}; you need {k} → keep {} in another account",
+                shares(n - here.len()),
+                label(here[0])
+            ));
+        }
+    }
     let loss = match (loss_weak, n - k) {
         (true, _) => Verdict::Weak,
         (false, 1) => Verdict::Ok,
@@ -111,12 +136,7 @@ pub fn score(layout: &Layout, places: Option<&[String]>) -> Score {
             }
         }
     }
-    // 1Password shares in one account are one place to a thief: one breach of that account opens them all.
-    // The account is in the setup, so this applies with places unknown too. Accounts are ASCII (check_account).
-    let account = |i: usize| match &layout.shares[i].kind {
-        ShareKind::OnePassword { account, .. } => Some(account.as_str()),
-        _ => None,
-    };
+    // One breach of a 1Password account opens every share in it (`account` is defined above).
     let mut warned: Vec<&str> = Vec::new();
     for c in &combos {
         let Some(first) = account(c[0]) else {
@@ -238,6 +258,24 @@ mod tests {
             s.warnings
                 .iter()
                 .any(|w| w.contains("a fire at home leaves 2 shares; you need 3"))
+        );
+    }
+
+    #[test]
+    fn losing_a_shared_1password_account_is_weak() {
+        // 4 of 5, two shares in one account: losing it leaves 3 < 4, with or without places
+        let spec = lay("4of5 key,key,paper,op,op");
+        for p in [None, Some(places(["a", "b", "c", "d", "e"]))] {
+            let s = score(&spec, p.as_deref());
+            assert_eq!(s.loss, Verdict::Weak);
+            assert!(s.warnings.iter().any(|w| w.contains(
+                "losing the 1Password account my.1password.com leaves 3 shares; you need 4 → keep 1Password A in another account"
+            )));
+        }
+        // one share per account is fine
+        assert_eq!(
+            score(&lay("4of5 key,key,paper,paper,op"), None).loss,
+            Verdict::Ok
         );
     }
 
