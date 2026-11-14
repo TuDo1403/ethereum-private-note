@@ -348,7 +348,7 @@ pub fn review(layout: &Layout, places: Option<&[String]>) -> Result<bool, String
     }
 }
 
-/// `vault plan`: choose, save setup.txt (or setup-<n>.txt if taken), show the private where-things-are list
+/// `vault plan`: choose, save `setup.txt` (or `setup-<n>.txt` if taken), show the private where-things-are list
 /// (label -> place) once, clear the screen on Enter.
 pub fn plan() -> Result<(), String> {
     clear();
