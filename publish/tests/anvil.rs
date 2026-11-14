@@ -51,13 +51,15 @@ async fn start_anvil_with(extra: &[&str]) -> Option<Anvil> {
     let url = format!("http://127.0.0.1:{port}");
     let anvil = Anvil(child, url.clone());
     let p = ProviderBuilder::new().connect(&url).await.unwrap();
-    for _ in 0..50 {
+    // 30 s: tests run in parallel and the macos-x86_64 CI runner is slow enough that
+    // a 5 s budget made `anvil did not start` flake there. Healthy startup returns early.
+    for _ in 0..300 {
         if p.get_chain_id().await.is_ok() {
             return Some(anvil);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("anvil did not start");
+    panic!("anvil did not start within 30s");
 }
 
 async fn set_code(url: &str, who: Address, code: &str) {
