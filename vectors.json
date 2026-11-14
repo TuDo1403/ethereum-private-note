@@ -1,0 +1,47 @@
+[
+  {
+    "name": "fast-12-words",
+    "passphrase": "correct horse battery staple",
+    "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    "prf": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "header": "010000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "random": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910",
+    "entropy": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+    "argon2id_out": "142e91085f5fe70d1be7519c8bdf731ac7fc50d8569da1392463008645f2310a",
+    "pad_a": "9d4310df9689053dcd20940ae63c4feaad295492a41c9f1fc1176a4176feec45",
+    "pad_b": "186b304b7799774a79f0287a8e089483044d6915a66626f156eb8cfa1ac6bb14",
+    "record": "010000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf7da3f03f76a9251ded40f46a865c6fca8d09b47244fc7f3fe1374a21169e8c25c6aed8b88db3405674f6334ab72a7b77d1832a4df71c4146f0661c61884f1fabc3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc8560f658de98b5b2b57ed362c4383c6c",
+    "share_c": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+    "share_c_words": "diamond juice drift apart senior advice flat main abandon ill click illegal harsh baby science screen boss offer elephant bar rebuild near dune impact"
+  },
+  {
+    "name": "fast-24-words-unicode-passphrase",
+    "passphrase": "ﬁancé ① pass phrase",
+    "mnemonic": "arctic live gadget display excess mandate sniff autumn people disorder affair hole retreat fancy close tip deer village tuition orbit cannon owner maid spare",
+    "prf": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "header": "010000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "random": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910",
+    "entropy": "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+    "argon2id_out": "dcf789adc2911f19e27c3b0211914b57d6db5f3084a334e20672a6f9ee85aeed",
+    "pad_a": "97f4b2f02aec09bf65d544aa2c626ef12002bf7ffb72811e607c7161c18e8135",
+    "pad_b": "186b304b7799774a79f0287a8e089483044d6915a66626f156eb8cfa1ac6bb14",
+    "record": "010000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf77145210cacc299f45b524ca4c024ed100225f9f1b92613e405c5101a1eee155c6aed8b88db3405674f6334ab72a7b77d1832a4df71c4146f0661c61884f1fabc3cad1d8dfe6edf4fb0209103c02abc8d27406708b99d66a356a0c67f43ae46deb2972fdef2663e29fc0713a3a30b3c88e2242ccf631bc2bfd1526905f",
+    "share_c": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+    "share_c_words": "diamond juice drift apart senior advice flat main abandon ill click illegal harsh baby science screen boss offer elephant bar rebuild near dune impact"
+  },
+  {
+    "name": "real-parameters-12-words",
+    "passphrase": "correct horse battery staple",
+    "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    "prf": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "header": "010010000003a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "random": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910",
+    "entropy": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+    "argon2id_out": "fb5eb544800ea8e02b16c1e6b34a50c89f612322f978605c42c10d86fbfbab37",
+    "pad_a": "aa8a2cc034fbf67fed803aecbc912d328270047dd99a8bc87dde2db82abc75ad",
+    "pad_b": "f80c5c45a4898fc0f2e5b2e801ee17699b6a6bfe8b40801bc2323b56218faf01",
+    "record": "010010000003a0a1a2a3a4a5a6a7a8a9aaabacadaeaf4a6acc20d4dbd65fcde05a8cdcf10d12a250e49d397a6be85dfe0dd84adc15cd26c9b4b65ea3b8dcffe3a9d838ccf89d4ea428a6da3ae7ac64bfabcdb3060bbec3cad1d8dfe6edf4fb0209100c76e4e2d794bde6fad5f168e8d29f09bd6164c821c666c4b1a5cb2f6dd74d5bbc2b22038561479d43519b3b105f5d8314",
+    "share_c": "3d2f190b052c3a08162432000e1caab8869422303e0c1a332d1f093b35271103",
+    "share_c_words": "diamond juice drift apart senior advice flat main abandon ill click illegal harsh baby science screen boss offer elephant bar rebuild near dune impact"
+  }
+]

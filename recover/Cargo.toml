@@ -1,0 +1,13 @@
+[package]
+name = "recover"
+version = "3.0.0"  # 3.0: backup and enroll moved to `vault`; this binary only restores
+edition = "2024"
+rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum
+
+# Restore only, and deliberately tiny: it is the tool you need in an emergency, so it depends on
+# the format crate and nothing else.
+[dependencies]
+backup-core = { path = "../core" }
+
+[dev-dependencies]
+serde_json = "=1.0.133"

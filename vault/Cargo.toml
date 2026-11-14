@@ -1,0 +1,12 @@
+[package]
+name = "vault"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum
+
+# The guided backup wizard. It may grow (providers, publishing); losing it never blocks a restore,
+# because `recover` and the format in SPEC.md stand alone.
+[dependencies]
+backup-core = { path = "../core" }
+rpassword = "=7.5.5"  # hidden prompts on the tty
+zeroize = "=1.9.1"    # wipe seed, passphrase and key material after use

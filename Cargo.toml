@@ -1,0 +1,10 @@
+[workspace]
+members = ["core", "recover", "vault"]
+resolver = "3"
+
+# Every dependency is pinned exactly and vendored in ./vendor (see .cargo/config.toml), so this builds
+# offline years from now. `recover` must stay tiny: it is the tool you need in an emergency.
+
+# The real-parameter vector needs 1 GiB Argon2id, which is far too slow unoptimised.
+[profile.test]
+opt-level = 3
