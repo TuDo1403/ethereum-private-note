@@ -83,6 +83,48 @@ fn paper_share(x: u8, s: Option<&SheetShare>) -> Result<Zeroizing<String>, Strin
     enter_paper_share(x)
 }
 
+/// The secret of the YubiKey that is share `x`. One key at a time, a failure (a key left plugged in, the
+/// wrong key, a wrong PIN) is shown and the owner asked again to plug in only that key: `--device`, which
+/// the listing error suggests, would make every key be read at one path.
+fn key_secret(
+    x: u8,
+    s: Option<&SheetShare>,
+    device: Option<&str>,
+    one_at_a_time: bool,
+) -> Result<Zeroizing<[u8; 32]>, String> {
+    let name = match s {
+        Some(s) if !s.label.is_empty() => format!(" (\"{}\")", s.label),
+        _ => String::new(),
+    };
+    for _ in 0..TRIES {
+        if one_at_a_time {
+            pause(&format!(
+                "Plug in only the YubiKey that is share {x}{name}, then press Enter."
+            ))?;
+        }
+        let cred = match s {
+            Some(SheetShare {
+                locator: Locator::Credential(c),
+                ..
+            }) => c.clone(),
+            _ => ask(&format!(
+                "Credential id of the YubiKey that is share {x} (from your recovery sheet): "
+            ))?,
+        };
+        println!("\nEnter the PIN, then touch the YubiKey that is share {x} when it blinks.");
+        match fido::secret(&cred, device) {
+            Ok(secret) => return Ok(Zeroizing::new(secret)),
+            Err(e) if !one_at_a_time => return Err(e),
+            // fido::device_path refuses to guess between keys; the owner only has to unplug one.
+            Err(e) if e.starts_with("several FIDO2 keys found") => println!(
+                "More than one key is plugged in: unplug the other keys, leave only the YubiKey that is share {x}, and try again."
+            ),
+            Err(e) => println!("{e}"),
+        }
+    }
+    Err(format!("the YubiKey that is share {x} was not read"))
+}
+
 pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     clear();
     println!(
@@ -141,27 +183,8 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     // Without --device the key is found by listing, which fails with two plugged in: one at a time.
     let one_at_a_time = keys.len() > 1 && device.is_none();
     for &x in &keys {
-        let s = on_sheet(x);
-        if one_at_a_time {
-            let name = match s {
-                Some(s) if !s.label.is_empty() => format!(" (\"{}\")", s.label),
-                _ => String::new(),
-            };
-            pause(&format!(
-                "Plug in only the YubiKey that is share {x}{name}, then press Enter."
-            ))?;
-        }
-        let cred = match s {
-            Some(SheetShare {
-                locator: Locator::Credential(c),
-                ..
-            }) => c.clone(),
-            _ => ask(&format!(
-                "Credential id of the YubiKey that is share {x} (from your recovery sheet): "
-            ))?,
-        };
-        println!("\nEnter the PIN, then touch the YubiKey that is share {x} when it blinks.");
-        hardware.push((x, fido::secret(&cred, device.as_deref())?));
+        let secret = key_secret(x, on_sheet(x), device.as_deref(), one_at_a_time)?;
+        hardware.push((x, *secret));
     }
 
     // What is typed (passphrase, paper words) by share number, so a failed attempt can retype any of them.

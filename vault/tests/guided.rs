@@ -560,7 +560,10 @@ answer "share 1: passphrase" n
 answer "share 2: YubiKey A" y
 answer "share 3: YubiKey B" y
 answer "share 4: paper" n
-expect "Plug in only the YubiKey that is share 2"; plug A; send "\r"
+# Both keys left plugged in: told to unplug one and asked again, not sent to --device.
+expect "Plug in only the YubiKey that is share 2"; plug A; close [open "$env(WORK)/two" w]; send "\r"
+expect "More than one key is plugged in"
+expect "Plug in only the YubiKey that is share 2"; file delete "$env(WORK)/two"; send "\r"
 expect "Plug in only the YubiKey that is share 3"; plug B; send "\r"
 expect -re {Seed fingerprint: ([0-9a-f]{8})} {
     if {$expect_out(1,string) ne $fp} { fail "verify-only fingerprint $expect_out(1,string) is not $fp" }
@@ -587,6 +590,8 @@ fn backup_two_keys_from_plan() {
     let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(SEED).unwrap());
     assert!(transcript.contains(&format!("FP={fp}")), "{transcript}");
     assert!(!transcript.contains("sausage"), "seed shown");
+    // With several keys plugged in, backup and restore say to unplug one, never to use --device.
+    assert!(!transcript.contains("with --device"), "{transcript}");
     let dir = work.join(
         transcript
             .rsplit_once("DIR=")
