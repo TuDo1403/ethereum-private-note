@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "09b1e5b59e04ef9b4a33be6a081a98c9f6078c42"
+  },
+  "path_in_vcs": "crates/rlp-derive"
+}

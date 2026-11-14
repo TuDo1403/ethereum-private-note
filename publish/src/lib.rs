@@ -1,0 +1,399 @@
+//! Publish a 147-byte record to `BlobStore` at its canonical CREATE2 address, paying gas from a
+//! throwaway key that exists only in memory. Flow: check chain -> check/plan deploy -> wait for the
+//! throwaway address to be funded -> (deploy) -> store -> read back -> sweep leftovers.
+use alloy::{
+    network::{Ethereum, TransactionBuilder},
+    primitives::{Address, Bytes, B256, U256, address, b256, keccak256},
+    providers::{PendingTransactionBuilder, Provider, ProviderBuilder},
+    rpc::types::{TransactionReceipt, TransactionRequest},
+    signers::local::PrivateKeySigner,
+    sol,
+};
+use std::time::{Duration, Instant};
+
+sol! {
+    #[sol(rpc)]
+    contract BlobStore {
+        function store(bytes calldata record) external;
+        function records(address) external view returns (bytes memory);
+    }
+}
+
+/// Record format v1 size (see SPEC.md).
+pub const RECORD_LEN: usize = 147;
+/// The standard deterministic deployer (Arachnid): calldata = salt (32) ++ init code.
+pub const CREATE2_DEPLOYER: Address = address!("4e59b44847b379578588920ca78fbf26c0b4956c");
+/// keccak256("onchain-safe/BlobStore/v1")
+pub const SALT: B256 = b256!("7752f52bd595bb427776f5f476d1f1e439316cb4e37afe83e07cae9306a0eff8");
+/// Compiled with the solc settings pinned in foundry.toml; regenerate per publish/README.md.
+const INIT_CODE_HEX: &str = include_str!("../blobstore.initcode.hex");
+pub const INIT_CODE_HASH: B256 = b256!("76194896a2afb0c2a0cae428ac479a92e94dc6410bf1a452626c437aa6024259");
+pub const RUNTIME_CODE_HASH: B256 = b256!("ca12aa270c3fd1a6a08361ec47e57523e4ed8e4aff32001405acb50bb3e8f0de");
+/// CREATE2(CREATE2_DEPLOYER, SALT, INIT_CODE_HASH): the same on every chain.
+pub const CANONICAL_ADDRESS: Address = address!("0356F8a3FD7ef15B775896B63f822307547D8971");
+
+/// Upper bound for `store` of a 147-byte record (~6 cold SSTOREs, ~160k): used only when the
+/// contract is not deployed yet, so it cannot be estimated. A too-low bound would revert the tx.
+const STORE_GAS_UNDEPLOYED: u64 = 300_000;
+const SWEEP_GAS: u64 = 21_000;
+/// Gas limits are the node's estimate plus 20 %.
+const GAS_MARGIN_PCT: u64 = 120;
+/// The funding request is (all gas limits + sweep) x max fee x this. The x2 covers fee moves while we
+/// wait for funds AND costs the gas estimate does not include (OP-stack L2s add an L1 data fee).
+/// Everything unspent is swept back, so overshooting only locks funds for a few minutes.
+const HEADROOM: u64 = 2;
+/// Refuse to run when the quoted max fee or the total request exceeds these (a lying or broken RPC
+/// could otherwise make us ask for, and then burn, a lot). Override with `Options::allow_high_fees`.
+const MAX_FEE_CAP: u128 = 500_000_000_000; // 500 gwei
+const MAX_TOTAL_CAP: u128 = 500_000_000_000_000_000; // 0.5 ETH
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+const READBACK_TRIES: u32 = 5;
+const READBACK_DELAY: Duration = Duration::from_secs(1);
+
+/// Parse an address: `0x` required; mixed-case input must have a valid EIP-55 checksum.
+pub fn parse_address(text: &str) -> Result<Address, String> {
+    let body = text.strip_prefix("0x").ok_or("address must start with 0x")?;
+    let mixed = body.chars().any(|c| c.is_ascii_lowercase()) && body.chars().any(|c| c.is_ascii_uppercase());
+    let parsed = if mixed { Address::parse_checksummed(text, None).map_err(|e| e.to_string()) } else { text.parse::<Address>().map_err(|e| e.to_string()) };
+    parsed.map_err(|e| format!("bad address: {e}"))
+}
+
+/// Parse a `record.hex` file: `0x` + 294 hex digits (surrounding whitespace allowed).
+pub fn parse_record(text: &str) -> Result<Vec<u8>, String> {
+    let body = text.trim().strip_prefix("0x").ok_or("record must start with 0x")?;
+    let bytes = alloy::hex::decode(body).map_err(|e| format!("record is not hex: {e}"))?;
+    if bytes.len() != RECORD_LEN {
+        return Err(format!("record is {} bytes, expected {RECORD_LEN}", bytes.len()));
+    }
+    Ok(bytes)
+}
+
+/// The init code, checked against the committed hash so a corrupted file can never change the address.
+fn init_code() -> Result<Vec<u8>, String> {
+    let code = alloy::hex::decode(INIT_CODE_HEX.trim()).map_err(|e| format!("bad embedded init code: {e}"))?;
+    if keccak256(&code) != INIT_CODE_HASH {
+        return Err("embedded init code does not match INIT_CODE_HASH".into());
+    }
+    Ok(code)
+}
+
+/// What the run produced; everything the recovery sheet needs.
+#[derive(Debug)]
+pub struct Outcome {
+    pub chain_id: u64,
+    pub contract: Address,
+    pub sender: Address,
+    pub deployed_now: bool,
+    /// Wei returned to the refund address (0 if nothing was left to sweep).
+    pub swept: U256,
+}
+
+pub struct Options<'a> {
+    pub rpc_url: &'a str,
+    /// Second RPC used ONLY for the read-back, so one lying node cannot fake "stored".
+    pub verify_rpc_url: Option<&'a str>,
+    pub refund: Address,
+    pub fund_timeout: Duration,
+    /// Confirmations to wait for on deploy and store (1 = included in a block).
+    pub confirmations: u64,
+    pub allow_high_fees: bool,
+}
+
+/// Shown to the user (possibly more than once: the amount is re-quoted after funding arrives).
+pub struct FundRequest {
+    pub sender: Address,
+    pub chain_id: u64,
+    pub required_wei: U256,
+    pub refund: Address,
+}
+
+impl FundRequest {
+    /// EIP-681 payment URI; `@chain_id` stops a wallet from paying on the wrong network.
+    pub fn uri(&self) -> String {
+        format!("ethereum:{}@{}?value={}", self.sender, self.chain_id, self.required_wei)
+    }
+}
+
+fn e<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> String {
+    move |err| format!("{what}: {err}")
+}
+
+/// RPC URLs may carry an API key and library errors echo them: hide them from every message.
+fn scrub(mut msg: String, urls: &[&str]) -> String {
+    for u in urls.iter().filter(|u| !u.is_empty()) {
+        msg = msg.replace(u, "<rpc>").replace(u.trim_end_matches('/'), "<rpc>");
+    }
+    msg
+}
+
+/// Run the whole flow. `on_fund` is called before polling and again if the price moves.
+pub async fn publish(opts: &Options<'_>, record: &[u8], mut on_fund: impl FnMut(&FundRequest)) -> Result<Outcome, String> {
+    let urls = [opts.rpc_url, opts.verify_rpc_url.unwrap_or("")];
+    run(opts, record, &mut on_fund).await.map_err(|m| scrub(m, &urls))
+}
+
+async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundRequest)) -> Result<Outcome, String> {
+    if record.len() != RECORD_LEN {
+        return Err(format!("record is {} bytes, expected {RECORD_LEN}", record.len()));
+    }
+    let init = init_code()?;
+
+    // The signer (and every clone the provider holds) is dropped when this function returns;
+    // k256's SigningKey zeroizes itself on drop. Nothing here ever prints or stores the key.
+    let signer = PrivateKeySigner::random();
+    let sender = signer.address();
+    let provider = ProviderBuilder::new().wallet(signer).connect(opts.rpc_url).await.map_err(e("cannot connect to RPC"))?;
+    let reader = ProviderBuilder::new().connect(opts.verify_rpc_url.unwrap_or(opts.rpc_url)).await.map_err(e("cannot connect to verify RPC"))?;
+
+    let chain_id = provider.get_chain_id().await.map_err(e("chain id"))?;
+    if chain_id == 0 {
+        return Err("RPC reported chain id 0".into());
+    }
+    if reader.get_chain_id().await.map_err(e("verify RPC chain id"))? != chain_id {
+        return Err("verify RPC is on a different chain".into());
+    }
+    eprintln!("chain id {chain_id}");
+
+    // A sweep to an address with code runs that code and can exceed the fixed 21000 gas: refuse early.
+    let refund = opts.refund;
+    if [Address::ZERO, sender, CANONICAL_ADDRESS, CREATE2_DEPLOYER].contains(&refund) {
+        return Err("refund address must be your own plain account, not zero/the sender/a contract of this tool".into());
+    }
+    if !provider.get_code_at(refund).await.map_err(e("get code"))?.is_empty() {
+        return Err("refund address has code (contract or delegated account); the sweep could fail, use a plain account".into());
+    }
+
+    // Deployment state: absent -> deploy; present -> must be exactly our bytecode.
+    let code = provider.get_code_at(CANONICAL_ADDRESS).await.map_err(e("get code"))?;
+    let need_deploy = if code.is_empty() {
+        if provider.get_code_at(CREATE2_DEPLOYER).await.map_err(e("get code"))?.is_empty() {
+            return Err(format!("CREATE2 deployer {CREATE2_DEPLOYER} is not deployed on chain {chain_id}"));
+        }
+        true
+    } else if keccak256(&code) != RUNTIME_CODE_HASH {
+        return Err(format!("code at {CANONICAL_ADDRESS} has an unexpected hash; refusing to use it"));
+    } else {
+        eprintln!("BlobStore already deployed at {CANONICAL_ADDRESS}, runtime hash verified");
+        false
+    };
+
+    // Gas estimates are made once (an unfunded `from` is fine: no gas price is set on the request).
+    let with_margin = |g: u64| g.saturating_mul(GAS_MARGIN_PCT) / 100;
+    let store = BlobStore::new(CANONICAL_ADDRESS, &provider);
+    let deploy_tx = TransactionRequest::default().with_to(CREATE2_DEPLOYER).with_input([SALT.as_slice(), &init].concat());
+    let deploy_gas = if need_deploy {
+        with_margin(provider.estimate_gas(deploy_tx.clone().with_from(sender)).await.map_err(e("deploy gas estimate"))?)
+    } else {
+        0
+    };
+    let store_gas = if need_deploy {
+        STORE_GAS_UNDEPLOYED
+    } else {
+        with_margin(store.store(Bytes::copy_from_slice(record)).from(sender).estimate_gas().await.map_err(e("store gas estimate"))?)
+    };
+    let gas_total = deploy_gas + store_gas + SWEEP_GAS;
+
+    // From the moment funds can arrive, EVERY exit must go through the sweep below.
+    let work = async {
+        let (first_fee, _) = quote_fees(&provider).await?;
+        let mut required = budget(gas_total, first_fee, opts.allow_high_fees)?;
+        let mut req = FundRequest { sender, chain_id, required_wei: required, refund };
+        on_fund(&req);
+        let deadline = Instant::now() + opts.fund_timeout;
+        let (max_fee, tip) = loop {
+            let balance = provider.get_balance(sender).await.map_err(e("balance"))?;
+            if balance >= required {
+                // Funding may have taken minutes: re-quote and require the new total.
+                let (max_fee, tip) = quote_fees(&provider).await?;
+                let fresh = budget(gas_total, max_fee, opts.allow_high_fees)?;
+                if balance >= fresh {
+                    eprintln!("funded: {balance} wei");
+                    break (max_fee, tip);
+                }
+                required = fresh;
+                req.required_wei = fresh;
+                on_fund(&req);
+            } else if Instant::now() >= deadline {
+                return Err(format!("timed out: {sender} holds {balance} wei, needs {required}"));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+
+        if need_deploy {
+            let tx = deploy_tx.with_gas_limit(deploy_gas).with_max_fee_per_gas(max_fee).with_max_priority_fee_per_gas(tip).with_nonce(next_nonce(&provider, sender).await?);
+            let pending = provider.send_transaction(tx).await.map_err(e("send deploy"))?;
+            let receipt = confirmed(pending, "deploy", sender, opts.confirmations).await?;
+            let code = provider.get_code_at(CANONICAL_ADDRESS).await.map_err(e("get code"))?;
+            if keccak256(&code) != RUNTIME_CODE_HASH {
+                return Err(format!("after deploy, code at {CANONICAL_ADDRESS} does not match the expected hash"));
+            }
+            eprintln!("deployed BlobStore at {CANONICAL_ADDRESS} (tx {})", receipt.transaction_hash);
+        }
+
+        let pending = store
+            .store(Bytes::copy_from_slice(record))
+            .gas(store_gas)
+            .max_fee_per_gas(max_fee)
+            .max_priority_fee_per_gas(tip)
+            .nonce(next_nonce(&provider, sender).await?)
+            .send()
+            .await
+            .map_err(e("send store"))?;
+        let receipt = confirmed(pending, "store", sender, opts.confirmations).await?;
+        read_back(&reader, sender, record).await?;
+        eprintln!("stored and verified (tx {})", receipt.transaction_hash);
+        Ok(())
+    }
+    .await;
+
+    let swept = sweep(&provider, sender, refund).await;
+    match (work, swept) {
+        (Ok(()), Ok(swept)) => Ok(Outcome { chain_id, contract: CANONICAL_ADDRESS, sender, deployed_now: need_deploy, swept }),
+        (Ok(()), Err(s)) => Err(format!("record is stored, but the sweep failed: {s}. Leftover ETH is stranded at {sender}")),
+        (Err(w), Ok(v)) if v.is_zero() => Err(format!("{w} (nothing to sweep)")),
+        (Err(w), Ok(v)) => Err(format!("{w} (swept {v} wei back to {refund})")),
+        (Err(w), Err(s)) => Err(format!("{w}; ALSO the sweep failed: {s}. Funds may be stranded at {sender}")),
+    }
+}
+
+/// EIP-1559 fees from the node; zero or absurd values are refused later by `budget`.
+async fn quote_fees(p: &impl Provider) -> Result<(u128, u128), String> {
+    let f = p.estimate_eip1559_fees().await.map_err(e("fee estimate (legacy non-EIP-1559 chains are unsupported)"))?;
+    if f.max_fee_per_gas == 0 {
+        return Err("RPC returned a zero max fee".into());
+    }
+    Ok((f.max_fee_per_gas, f.max_priority_fee_per_gas))
+}
+
+/// Total wei to request, with the headroom and the sanity caps applied.
+fn budget(gas_total: u64, max_fee: u128, allow_high: bool) -> Result<U256, String> {
+    let total = U256::from(gas_total) * U256::from(max_fee) * U256::from(HEADROOM);
+    if !allow_high && (max_fee > MAX_FEE_CAP || total > U256::from(MAX_TOTAL_CAP)) {
+        return Err(format!("quoted max fee {max_fee} wei/gas, total {total} wei: above the sanity cap (allow_high_fees overrides)"));
+    }
+    Ok(total)
+}
+
+/// Pending nonce, fetched fresh for every tx: alloy's cached nonce manager would skip a nonce after a
+/// failed send and strand every later tx (including the sweep).
+async fn next_nonce(p: &impl Provider, who: Address) -> Result<u64, String> {
+    p.get_transaction_count(who).pending().await.map_err(e("nonce"))
+}
+
+/// Wait for inclusion (+ confirmations) with a timeout; errors name the sender and tx hash.
+async fn confirmed(pending: PendingTransactionBuilder<Ethereum>, what: &str, sender: Address, confirmations: u64) -> Result<TransactionReceipt, String> {
+    let hash = *pending.tx_hash();
+    let receipt = pending
+        .with_required_confirmations(confirmations.max(1))
+        .with_timeout(Some(RECEIPT_TIMEOUT))
+        .get_receipt()
+        .await
+        .map_err(|err| format!("{what} tx {hash} from {sender} not confirmed: {err}"))?;
+    if !receipt.status() {
+        return Err(format!("{what} tx {hash} reverted"));
+    }
+    Ok(receipt)
+}
+
+/// Read `records(sender)` and require it to equal the record. An empty answer is retried (a
+/// load-balanced node can lag the receipt); a different non-empty answer fails at once.
+async fn read_back(reader: &impl Provider, sender: Address, record: &[u8]) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..READBACK_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(READBACK_DELAY).await;
+        }
+        match BlobStore::new(CANONICAL_ADDRESS, reader).records(sender).call().await {
+            Ok(b) if b.as_ref() == record => return Ok(()),
+            Ok(b) if !b.is_empty() => return Err("record read back from chain differs from the record sent".into()),
+            Ok(_) => last = "empty".into(),
+            Err(err) => last = err.to_string(),
+        }
+    }
+    Err(format!("read-back of records(sender) failed after {READBACK_TRIES} tries: {last}"))
+}
+
+/// Send everything above the fee to `refund`; returns the wei sent (0 = nothing worth sending).
+/// If the node rejects the value for insufficient funds (e.g. an L2 data fee on top of gas), retry
+/// with a doubled fee reserve.
+async fn sweep(p: &impl Provider, sender: Address, refund: Address) -> Result<U256, String> {
+    let balance = p.get_balance(sender).await.map_err(e("balance"))?;
+    let (max_fee, tip) = quote_fees(p).await?;
+    let mut reserve = U256::from(SWEEP_GAS) * U256::from(max_fee);
+    let mut last = String::new();
+    for _ in 0..4 {
+        if balance <= reserve {
+            return Ok(U256::ZERO);
+        }
+        let value = balance - reserve;
+        let tx = TransactionRequest::default()
+            .with_to(refund)
+            .with_value(value)
+            .with_gas_limit(SWEEP_GAS)
+            .with_max_fee_per_gas(max_fee)
+            .with_max_priority_fee_per_gas(tip)
+            .with_nonce(next_nonce(p, sender).await?);
+        match p.send_transaction(tx).await {
+            Ok(pending) => {
+                confirmed(pending, "sweep", sender, 1).await?;
+                eprintln!("swept {value} wei to {refund}");
+                return Ok(value);
+            }
+            Err(err) => {
+                last = err.to_string();
+                reserve *= U256::from(2);
+            }
+        }
+    }
+    Err(format!("send sweep: {last}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constants_are_consistent() {
+        let init = init_code().unwrap();
+        assert_eq!(CANONICAL_ADDRESS, CREATE2_DEPLOYER.create2(SALT, keccak256(&init)));
+        assert_eq!(SALT, keccak256("onchain-safe/BlobStore/v1"));
+    }
+
+    #[test]
+    fn address_parsing() {
+        let lower = "0x52908400098527886e0f7030069857d2e4169ee7";
+        let upper = "0x52908400098527886E0F7030069857D2E4169EE7"; // all-caps EIP-55 vector
+        assert!(parse_address(lower).is_ok() && parse_address(upper).is_ok());
+        assert!(parse_address("0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB").is_ok()); // valid mixed
+        assert!(parse_address("0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6Fb").is_err()); // bad checksum
+        assert!(parse_address(&lower[2..]).is_err()); // no 0x
+    }
+
+    #[test]
+    fn uri_has_chain_id() {
+        let r = FundRequest { sender: address!("00000000000000000000000000000000000000aa"), chain_id: 4153, required_wei: U256::from(7), refund: Address::ZERO };
+        assert_eq!(r.uri(), "ethereum:0x00000000000000000000000000000000000000AA@4153?value=7");
+    }
+
+    #[test]
+    fn scrub_hides_urls() {
+        let m = scrub("error sending request for url (https://rpc.x/key/SECRET)".into(), &["https://rpc.x/key/SECRET", ""]);
+        assert!(!m.contains("SECRET"));
+    }
+
+    #[test]
+    fn budget_caps() {
+        assert!(budget(1_000_000, 1_000_000_000, false).is_ok());
+        assert!(budget(1_000_000, MAX_FEE_CAP + 1, false).is_err());
+        assert!(budget(1_000_000, MAX_FEE_CAP + 1, true).is_ok());
+    }
+
+    #[test]
+    fn record_parsing() {
+        let ok = format!("0x{}\n", "ab".repeat(RECORD_LEN));
+        assert_eq!(parse_record(&ok).unwrap().len(), RECORD_LEN);
+        assert!(parse_record(&"ab".repeat(RECORD_LEN)).is_err()); // no 0x
+        assert!(parse_record(&format!("0x{}", "ab".repeat(RECORD_LEN - 1))).is_err());
+        assert!(parse_record(&format!("0x{}zz", "ab".repeat(RECORD_LEN - 1))).is_err());
+    }
+}
