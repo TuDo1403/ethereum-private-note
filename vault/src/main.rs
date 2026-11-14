@@ -9,14 +9,12 @@
 //! Nothing here is needed to restore: `recover` and SPEC.md stand alone.
 
 mod backup;
-#[allow(dead_code)] // used from Task 6
 mod layout;
 mod onepassword;
 mod prompt;
 mod restore;
 mod score;
 mod setup;
-#[allow(dead_code)] // used from Task 6
 mod sheet;
 
 use clap::{Parser, Subcommand};
@@ -38,12 +36,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Make a new backup of a seed (run it offline)
-    Backup,
+    Backup {
+        /// A setup file saved by `vault plan`; without one, the setup is chosen now
+        setup: Option<String>,
+    },
     /// Design and score a setup with no secrets (any machine); saves it as setup.txt, without places
     Plan,
     /// Restore a seed, or verify a backup without ever showing the seed
     Restore,
-    /// Put share 2 of a 1Password backup into 1Password (online; only share 2 is typed)
+    /// Put a 1Password share of a backup into 1Password (online; only that share is typed)
     OpStore {
         /// The backup's recovery-sheet.txt, which names the account and the item
         sheet: String,
@@ -67,14 +68,14 @@ fn run() -> Result<(), String> {
                     "Restore a seed from a backup",
                 ],
             )? {
-                0 => Cmd::Backup,
+                0 => Cmd::Backup { setup: None },
                 1 => Cmd::Plan,
                 _ => Cmd::Restore,
             }
         }
     };
     match command {
-        Cmd::Backup => backup::backup(cli.device),
+        Cmd::Backup { setup } => backup::backup(setup, cli.device),
         Cmd::Plan => setup::plan(),
         Cmd::Restore => restore::restore_flow(cli.device),
         Cmd::OpStore { sheet } => backup::op_store(&sheet),

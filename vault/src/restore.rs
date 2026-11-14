@@ -86,7 +86,7 @@ fn paper_share(x: u8, s: Option<&SheetShare>) -> Result<Zeroizing<String>, Strin
 pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     clear();
     println!(
-        "Restore your seed. You need the record and enough of its factors (2 of 3 for a backup made by `vault`).\n"
+        "Restore your seed. You need the record and enough of its factors (the recovery sheet says how many).\n"
     );
     let modes = [
         "Verify only: check the factors and show the seed fingerprint, never the seed",

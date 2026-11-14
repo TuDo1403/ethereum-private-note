@@ -1,4 +1,4 @@
-//! Share 2 kept in 1Password instead of on a YubiKey: a paper share (24 words) stored as a 1Password item
+//! A share kept in 1Password instead of on paper or a YubiKey: a paper share (24 words) stored as a 1Password item
 //! and read back with `op read`, which the 1Password app unlocks with Touch ID. The record format does not
 //! change: to the record this is just a paper share that happens to live in a password manager.
 //!
@@ -147,13 +147,9 @@ pub struct SheetRef {
     pub account: String,
 }
 
-/// The sheet line for a share: `1password:  share 2 op://... account my.1password.com`.
-pub fn sheet_line(x: u8, reference: &str, account: &str) -> String {
-    format!("{SHEET_PREFIX:<18}share {x} {reference} account {account}")
-}
-
-/// Every share a recovery sheet names on `1password:` lines (see `sheet_line`). Vault and item names may
-/// hold spaces, so the reference is everything between the share number and the last " account ".
+/// Every share an old recovery sheet names on `1password:` lines (`1password:  share 2 op://... account
+/// my.1password.com`; new sheets have `share N:` lines, see sheet.rs). Vault and item names may hold
+/// spaces, so the reference is everything between the share number and the last " account ".
 pub fn sheet_references(sheet: &str) -> Vec<SheetRef> {
     sheet
         .lines()
@@ -188,11 +184,8 @@ mod tests {
         for bad in ["", "a\"b", "a/b", "a\nb"] {
             assert!(check_name("v", bad).is_err(), "{bad:?}");
         }
-        let line = sheet_line(
-            2,
-            "op://Personal/epn-share-2-ab/password",
-            "my.1password.com",
-        );
+        // the line old backups wrote
+        let line = "1password:        share 2 op://Personal/epn-share-2-ab/password account my.1password.com";
         let refs = sheet_references(&format!("x\n{line}   (read with `op read`)\n"));
         assert_eq!(refs.len(), 1);
         assert_eq!(
@@ -210,8 +203,7 @@ mod tests {
         // Spaces in vault and item names (check_name allows them) survive the round trip.
         let spaced = "op://Personal Vault/my share 2/password";
         let refs = sheet_references(&format!(
-            "{}   (1Password asks for Touch ID)\n",
-            sheet_line(2, spaced, "me@x.com")
+            "1password:        share 2 {spaced} account me@x.com   (1Password asks for Touch ID)\n"
         ));
         assert_eq!(
             (
