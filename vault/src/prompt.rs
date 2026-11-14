@@ -109,13 +109,54 @@ pub fn enter_paper_share(x: u8) -> Result<Zeroizing<String>, String> {
         let Err(e) = share_from_words(&joined) else {
             return Ok(joined);
         };
-        // The checksum says some word is wrong but not which one, so the user picks.
+        // The checksum says some word is wrong but not which one, so the user picks. An empty answer gives
+        // up: a paper that cannot be typed correctly must not trap the user here.
         println!("\n{e}");
-        let n: usize = ask("Which word number (1-24) do you want to type again? ")?
-            .parse()
-            .unwrap_or(0);
-        if (1..=24).contains(&n) {
+        let answer = ask("Which word number (1-24) do you want to type again? (Enter gives up) ")?;
+        if answer.is_empty() {
+            return Err(format!("paper share {x} not entered"));
+        }
+        if let Ok(n @ 1..=24) = answer.parse::<usize>() {
             words[n - 1] = word(n, "")?;
         }
     }
+}
+
+/// Runs `attempt` until it succeeds, at most `TRIES` times, for a step that needs one YubiKey: each failure
+/// (a missed touch, a wrong PIN, the wrong key, a refused id) is shown and the owner asked again. With
+/// several keys to read, `plug_only` first asks for that key alone to be plugged in: `fido` refuses to guess
+/// between keys, and `--device` would make every key be read at one path.
+pub fn with_key<T>(
+    key: &str,
+    plug_only: bool,
+    mut attempt: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    for _ in 0..TRIES {
+        if plug_only {
+            pause(&format!("Plug in only {key}, then press Enter."))?;
+        }
+        match attempt() {
+            Ok(done) => return Ok(done),
+            Err(e) if several_keys(&e) => println!(
+                "More than one key is plugged in: unplug the other keys, leave only {key}, and try again."
+            ),
+            Err(e) => println!("{e}"),
+        }
+    }
+    Err(format!("{key} was not read after {TRIES} tries"))
+}
+
+/// `fido` refuses to guess between keys; the owner only has to unplug one.
+pub fn several_keys(error: &str) -> bool {
+    error.starts_with("several FIDO2 keys found")
+}
+
+/// `--device` names one path, so two YubiKeys would both be read there: they are plugged in one at a time.
+pub fn check_device(device: Option<&str>, keys: usize, whose: &str) -> Result<(), String> {
+    if device.is_some() && keys > 1 {
+        return Err(format!(
+            "--device names one key, but {whose} {keys} YubiKeys: run it without --device, and plug in one key at a time when asked"
+        ));
+    }
+    Ok(())
 }

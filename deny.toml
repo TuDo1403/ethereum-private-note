@@ -24,7 +24,8 @@ allow = [
 ]
 confidence-threshold = 0.9
 
-# The workspace crates (`publish = false`) have no licence of their own yet; skip them here.
+# The workspace crates (`publish = false`) declare no `license` and the repository has no LICENSE file,
+# so they would fail the check above; skip them. Remove this once the project picks a licence.
 [licenses.private]
 ignore = true
 

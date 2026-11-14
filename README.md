@@ -76,7 +76,7 @@ flowchart LR
 > matter as much as the commands.
 
 ```bash
-./vault plan                 # 1. design and score a setup (any machine, no secrets); writes setup.txt
+./vault plan                 # 1. design and score a setup (any machine, no secrets); writes setup.txt (it names the file: setup-2.txt if one exists)
 ./vault backup setup.txt     # 2. OFFLINE machine: make the backup; writes record.hex and recovery-sheet.txt
 ./vault restore              # 3. OFFLINE: pick "Verify only", try every combination of k shares
 ./publish <rpc-url> record.hex <refund-address>   # 4. ONLINE machine: store the public record on chain
@@ -132,7 +132,7 @@ record.
 
 | path | what |
 |------|------|
-| `core/` (`epn-core`) | the format: Argon2id, HKDF, GF(2^8) Shamir, AES-GCM, BIP39 words, FIDO2 via libfido2 |
+| `core/` (`epn-core`) | the format: Argon2id, HKDF, GF(2^8) Shamir, AES-GCM, BIP39 words, FIDO2 via libfido2, the host check |
 | `vault/` (`vault`) | interactive wizard: **plan** (design and score a setup, no secrets), **backup**, guided **restore**, and **op-store** (puts a 1Password share into 1Password) |
 | `recover/` (`recover`) | small, scriptable **restore-only** tool; the one to keep for emergencies |
 | `publish/` (`publish`) | online step: deploys the record as contract code from a throwaway gas key ([details](publish/README.md)) |
@@ -250,19 +250,21 @@ try setups before you go offline. It walks through:
    - 2 of 4: passphrase, two YubiKeys, paper
    - 3 of 5: passphrase, two YubiKeys, two paper shares
    - Custom: any 2 to 5 shares and any k from 2 to n, with at most one passphrase share. A share is a
-     passphrase, a YubiKey, a paper share or a 1Password share (account and vault are asked for).
+     passphrase, a YubiKey, a paper share or a 1Password share (account and vault are asked for; from the
+     second 1Password share on, the accounts already entered are offered).
 
    The shares are numbered in a fixed order, so the same setup always gets the same numbers: the passphrase
    first, then the YubiKeys, then the paper and 1Password shares.
-2. **Labels.** Each share gets a neutral name ("YubiKey A", "paper B"); you may rename it. Labels are
-   printed on the recovery sheet, which is public, so never put a place in a label (the review screen warns
+2. **Labels.** Each share gets a neutral name ("YubiKey A", "paper B"); you may rename it (no leading or
+   trailing space, no hidden characters). Labels are printed on the recovery sheet, which is public, so never put a place in a label (the review screen warns
    if one names a place you gave).
 3. **Places.** For each share, say where it will be kept ("home safe", "office", ...), from the places you
    named so far or a new one.
 4. **Review and score.** Two separate verdicts, using the places:
    - **Loss**, can you still restore after losing things. Weak if you can lose no share at all (n = k), or
-     if one place holds more than n - k shares, so a fire there locks you out. Ok if you can lose any one
-     share; strong if you can lose any two or more.
+     if one place (or one 1Password account) holds more than n - k shares, so a fire there, or losing
+     that account, locks you out. Ok if you can lose any one share; strong if you can lose any two or more.
+     Places are compared without regard to case.
    - **Theft**, what the cheapest combination costs a thief. Weak if one place holds a whole combination
      of k shares, so one break-in opens the backup, or if a whole combination is 1Password shares in one
      account, so one breach of that account opens it (checked with or without places). Otherwise ok if
@@ -270,8 +272,8 @@ try setups before you go offline. It walks through:
      1Password account, from different places), and strong if every combination needs a YubiKey and its
      PIN (the key locks after repeated wrong PINs).
 
-   Every warning names the exact combination and suggests a fix: move a share elsewhere, raise k, or add a
-   share. The screen lists every combination of k shares that opens the backup. A weak setup is never
+   Every warning names the exact combination and suggests a fix: move a share elsewhere, raise k (when k + 1 is still
+   less than n), or add a share. The screen lists every combination of k shares that opens the backup. A weak setup is never
    refused, but you must type `yes` to use it; for any other setup you press Enter.
 5. **Save.** `setup.txt` is written in the current folder (`setup-2.txt` and so on if one exists). It holds
    the labels, kinds, k and the 1Password accounts and vaults, and **never the places**: a file that says
@@ -306,7 +308,8 @@ N is depends on the setup:
 
 1. **Each YubiKey, one at a time.** For each YubiKey share, press Enter to create a new resident credential
    (PIN, then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it
-   goes on the recovery sheet. With several YubiKeys, `vault` says "Plug in only YubiKey B": plug in just
+   goes on the recovery sheet. A credential made here is kept if you have to retry after a wrong PIN or a
+   missed touch. With several YubiKeys, `vault` says "Plug in only YubiKey B": plug in just
    that key and press Enter, so that exactly one key is found (a setup with more than one YubiKey refuses
    `--device`). After the credential, its secret is read (PIN and touch). The keys come before the seed,
    so a missing key or a wrong PIN fails before you type anything.
@@ -332,8 +335,9 @@ N is depends on the setup:
    disk) **before** any paper share is shown, so a crash later cannot leave you with papers and no
    record. If writing fails, `vault` says so: destroy the papers of that run and start again.
 5. **Each paper and 1Password share, one at a time.** 24 words are shown once. Write them on a *separate*
-   paper and label it *"backup share X, not a wallet"*. Then type all 24 back (hidden); a mismatch shows
-   the share again so you can correct the paper. A 1Password share is shown the same way, but write it on
+   paper and label it *"backup share X, not a wallet"*. Then type all 24 back (hidden); a mismatch, or giving up on a word (an empty
+   answer to "Which word number"), clears the screen and shows the share again so you can correct the
+   paper (three tries; the last failure ends the backup after clearing the screen). A 1Password share is shown the same way, but write it on
    a **temporary** paper labelled *"share X, for 1Password, destroy after `vault op-store`"*, kept apart
    from the other papers (any k shares restore the seed), and type it back. Nothing is sent to 1Password
    during the backup: the sheet names the item `epn-share-<X>-<record id>` that `vault op-store` creates
@@ -386,16 +390,18 @@ tied to your seed, and it sweeps leftover ETH back.
 
 ```bash
 ./publish [--verify-rpc URL] [--confirmations N] [--allow-high-fees] <rpc-url> <record.hex> <refund-address>
+./publish --help | --version
 ```
 
 Missing arguments are prompted for. What happens:
 
 1. A throwaway key is created **in memory only**; its address and an `ethereum:<address>@<chain id>?value=<wei>`
    URI are printed. Send that amount from your wallet (check the chain id in the wallet). It waits 15 min.
-2. The record is deployed as the code of a new contract and read back.
-3. Leftover ETH is swept to the refund address, on every exit after funding, including failures.
-4. Chain id, the record's address and the record id are printed. **Write chain id and address on the
-   recovery sheet** (the record id must match the sheet's).
+2. The record is deployed as the code of a new contract. When it is mined, chain id, the record's address
+   and the record id are printed: **write chain id and address on the recovery sheet** (the record id must
+   match the sheet's).
+3. The code at that address is read back and compared with the record.
+4. Leftover ETH is swept to the refund address, on every exit after funding, including failures.
 
 Recommended flags:
 
@@ -448,16 +454,17 @@ item in the 1Password app on another device and type its 24 words when `vault` a
 ### Guided: `vault restore`
 
 ```bash
-./vault restore [--device PATH] [--allow-unsafe-host]
+./vault restore [--device PATH] [--allow-unsafe-host]   # --device is refused when you hold 2 or more YubiKeys
 ```
 
 Pick **Verify only** (seed fingerprint, never the seed; the default) or **Restore** (shows the seed) with
 the arrow keys and Enter. Paste the record
 hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the share names, each
-YubiKey credential id and each 1Password item; sheets made by earlier versions of `vault` still work).
+YubiKey credential id, and each 1Password item that is named for this record).
 Say which factors you have; the YubiKeys are asked first so a missing key or wrong PIN fails before you
 type anything, one at a time ("plug in only YubiKey B") when you hold several; if a key cannot be read
-(another key still plugged in, a wrong PIN), you are asked to plug it in again. A share kept in 1Password
+(another key still plugged in, a wrong PIN), you are asked to plug it in again (up to three tries; a credential id from the sheet is tried once, then you
+are asked to type it). A share kept in 1Password
 is offered from 1Password (Touch ID); if that read fails, you are asked to type the paper instead. Paper
 shares are entered word by word, the passphrase hidden. Three attempts. Verify only also lists any share
 you held that was not needed, since any k shares open the record: test such a share in another run. This
@@ -527,8 +534,7 @@ factors.
 Anyone with the record and **one** of the paper share or the YubiKey (with its PIN) can test passphrase
 guesses offline, for as long as they like. That is why the passphrase is generated (12 random words,
 132 bits) and stretched with Argon2id at 1 GiB and 3 passes: brute force is far out of reach, even for a
-quantum computer (Grover's search at best halves the bits, to about 66). Backups made with the older
-7-word passphrase still restore. Do not
+quantum computer (Grover's search at best halves the bits, to about 66). Do not
 replace it with something you chose, and do not shorten it.
 
 ### A leaked factor cannot be revoked
@@ -620,20 +626,22 @@ with `cast code` against a node you trust before relying on it.
   no factor can regenerate.
 - Keep `SPEC.md` printed with the paper share, and keep a copy of this repository (with `vendor/`)
   somewhere durable. `recover` builds offline from it.
-- The record carries a version byte; a future format must change it. Records of the earlier version 1
-  are not read by these tools; the git tag `v1-final` holds the last tools that did.
+- The record carries a version byte (1); a future format must change it, and these tools refuse any other.
 
 ## Limitations
 
 - **Not independently audited.** Treat it as such.
 - **`publish` has not been run against a real network yet**, only a local `anvil` chain. Do a full
-  test run on a testnet before mainnet. Legacy (non-EIP-1559) chains are unsupported.
+  test run on a testnet before mainnet. Legacy (non-EIP-1559) chains are unsupported. If the RPC is down
+  while the leftover ETH is swept, it retries for 5 minutes before it prints the throwaway key.
 - **The different-key check has not been run against a real YubiKey yet.** `vault backup` refuses a second
   YubiKey share that is the same physical key as an earlier one by listing the credentials on the key
   (`fido2-token -L -k localhost <device>`), which needs a YubiKey with FIDO2 credential management; the
   tests only use fake keys. Until it has been tried on real hardware, confirm yourself that each YubiKey
   share is on its own key: list each key's credentials with its PIN (the command under
   [Restoring](#restoring)) and check that each credential id on the recovery sheet appears on exactly one key.
+- **The 1Password path has only run against a fake `op`.** `op item create` with a JSON template on stdin
+  and `op read` are untested against the real CLI; try one `vault op-store` before relying on it.
 - The scores from `vault plan` only judge the places you type. They warn and never block.
 - `recover` does not wipe secrets from memory after use (`vault` does).
 
@@ -653,17 +661,17 @@ that `vendor/` is exactly what `cargo vendor` produces from `Cargo.lock`. The to
 
 ### Releasing
 
-All four crates share one version, `[workspace.package] version` in the root `Cargo.toml`.
+Every crate shares one version, `[workspace.package] version` in the root `Cargo.toml`.
 
 1. In a PR, set that version, run `cargo build --offline` so `Cargo.lock` follows, and merge it.
-2. Tag the merge commit and push the tag:
+2. Once `ci` is green on the merge commit, tag it and push the tag (only plain `vX.Y.Z` tags release):
 
    ```bash
    git tag vX.Y.Z && git push origin vX.Y.Z
    ```
 
 `release.yml` fails if the tag differs from the Cargo version. Otherwise it builds the binaries on
-each platform and publishes them, `install.sh` (stamped with the tag) and `SHA256SUMS` as a GitHub
+each platform, smoke-tests `vault --version` and `publish --version`, and publishes them, `install.sh` (stamped with the tag) and `SHA256SUMS` as a GitHub
 release with build provenance. "Run workflow" does the builds without publishing, as a dry run.
 
 The test profile builds with `opt-level = 3` because the real-parameter vector runs Argon2id at

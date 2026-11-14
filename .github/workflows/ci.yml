@@ -56,11 +56,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # `anvil` runs the publish end-to-end tests and `expect` the vault tests. Both skip themselves
-      # when missing, so a skip would pass silently: install them and assert they are there.
+      # when missing, so a skip would pass silently: install them and assert they are there. The foundry
+      # version is pinned so the tests always run against the same anvil.
       - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.9.0
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y expect
-      - run: command -v anvil expect
+      - run: command -v anvil && command -v expect
       - run: cargo test --workspace --locked
 
   # The vendored sources must be exactly what `cargo vendor` produces from Cargo.lock: nothing

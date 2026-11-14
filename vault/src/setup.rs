@@ -36,28 +36,13 @@ const KINDS: [(&str, ShareKind); 3] = [
     ("paper", ShareKind::Paper),
 ];
 
-fn one_password() -> ShareKind {
-    // account and vault are asked for once the shares are known (`onepassword_details`)
-    ShareKind::OnePassword {
-        account: String::new(),
-        vault: String::new(),
-    }
-}
-
 fn pick_setup() -> Result<Layout, String> {
     let mut presets = presets();
-    let notes = ["(today's setup)", "(today's 1Password setup)", "", ""];
     let mut items: Vec<String> = presets
         .iter()
-        .zip(notes)
-        .map(|((k, shares), note)| {
+        .map(|(k, shares)| {
             let labels: Vec<&str> = shares.iter().map(|s| s.label.as_str()).collect();
-            let line = format!(
-                "{k} of {}   {:<44} {note}",
-                shares.len(),
-                labels.join(" · ")
-            );
-            line.trim_end().to_string()
+            format!("{k} of {}   {}", shares.len(), labels.join(" · "))
         })
         .collect();
     items.push("Custom   pick each share, then the threshold".into());
@@ -83,7 +68,8 @@ fn custom() -> Result<(usize, Vec<ShareSpec>), String> {
             .filter(|(_, k)| *k != ShareKind::Passphrase || !kinds.iter().any(|(_, h)| h == k))
             .cloned()
             .collect();
-        offer.push(("1Password", one_password()));
+        // account and vault are asked for once the shares are known (`onepassword_details`)
+        offer.push(("1Password", ShareKind::one_password()));
         let mut items: Vec<String> = offer.iter().map(|(name, _)| name.to_string()).collect();
         if kinds.len() >= 2 {
             items.push("done: choose how many shares it takes".into());
@@ -176,6 +162,29 @@ fn ask_checked(prompt: &str, check: impl Fn(&str) -> Result<(), String>) -> Resu
     Err("no valid answer given".into())
 }
 
+/// An account already entered for another share, or a new one. The accounts are offered because the same
+/// account typed two ways (sign-in address, email) would hide that those shares are lost and breached
+/// together.
+fn ask_account(label: &str, known: &[String]) -> Result<String, String> {
+    if !known.is_empty() {
+        let mut items: Vec<&str> = known.iter().map(String::as_str).collect();
+        items.push("+ another account");
+        let i = prompt::choose(
+            &format!("Which 1Password account holds \"{label}\"?"),
+            &items,
+        )?;
+        if let Some(a) = known.get(i) {
+            return Ok(a.clone());
+        }
+    }
+    ask_checked(
+        &format!(
+            "1Password account for \"{label}\" (sign-in address or email, e.g. my.1password.com): "
+        ),
+        check_account,
+    )
+}
+
 fn onepassword_details(mut shares: Vec<ShareSpec>) -> Result<Vec<ShareSpec>, String> {
     if !shares
         .iter()
@@ -188,15 +197,13 @@ fn onepassword_details(mut shares: Vec<ShareSpec>) -> Result<Vec<ShareSpec>, Str
     println!(
         "\nUse a PERSONAL 1Password account, never a work one. `op account list` shows yours."
     );
+    let mut accounts: Vec<String> = Vec::new();
     for s in shares.iter_mut() {
         if let ShareKind::OnePassword { account, vault } = &mut s.kind {
-            *account = ask_checked(
-                &format!(
-                    "1Password account for \"{}\" (sign-in address or email, e.g. my.1password.com): ",
-                    s.label
-                ),
-                check_account,
-            )?;
+            *account = ask_account(&s.label, &accounts)?;
+            if !accounts.iter().any(|a| a.eq_ignore_ascii_case(account)) {
+                accounts.push(account.clone());
+            }
             *vault = ask_checked(
                 &format!(
                     "Vault in that account (`op vault list --account {account}` lists them): "
@@ -378,7 +385,7 @@ pub fn plan() -> Result<(), String> {
     Ok(())
 }
 
-/// setup.txt in the current folder, or setup-2.txt, setup-3.txt, ... when taken: an earlier plan is
+/// setup.txt in the current folder, or setup-2.txt, setup-3.txt, ... when taken: an existing plan is
 /// never overwritten.
 fn save_plan(text: &str) -> Result<String, String> {
     let mut n = 1;
@@ -394,10 +401,14 @@ fn save_plan(text: &str) -> Result<String, String> {
             .open(&path)
         {
             Ok(mut f) => {
+                // A cut file could parse as a valid, smaller setup: never leave one behind.
                 return f
                     .write_all(text.as_bytes())
                     .map(|_| path.clone())
-                    .map_err(|e| format!("cannot write {path}: {e}"));
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&path);
+                        format!("cannot write {path}: {e}")
+                    });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
             Err(e) => return Err(format!("cannot write {path}: {e}")),

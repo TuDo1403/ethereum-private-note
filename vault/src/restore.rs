@@ -1,12 +1,12 @@
 //! `vault restore`: asks which factors you hold and walks through each, for any record the format allows.
 //! Secrets are read at hidden prompts; "verify only" prints the seed fingerprint and never the seed.
 
-use crate::onepassword;
+use crate::onepassword::{self, split_reference, title};
 use crate::prompt::*;
 use crate::sheet::{self, Locator, SheetShare};
 use epn_core::bip39::words_to_entropy;
 use epn_core::record::{Header, Kind, parse_record, restore};
-use epn_core::{fido, seed_fingerprint, unhex};
+use epn_core::{fido, record_id, seed_fingerprint, unhex};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
@@ -32,24 +32,17 @@ fn read_record() -> Result<(Vec<u8>, Header, Vec<SheetShare>), String> {
     Err("no valid record given".into())
 }
 
-fn label(kind: Kind, in_1password: bool) -> &'static str {
-    match kind {
-        Kind::Passphrase => "passphrase",
-        Kind::Hardware => "YubiKey and its PIN",
-        Kind::Paper if in_1password => "1Password item (Touch ID)",
-        Kind::Paper => "paper share (24 words)",
-    }
-}
-
-/// What a share is called in a prompt: its sheet label (when it has one) before what it is.
+/// What a share is called in a prompt: its sheet label before what it is.
 fn describe(kind: Kind, s: Option<&SheetShare>) -> String {
-    let what = label(
-        kind,
-        matches!(s, Some(s) if matches!(s.locator, Locator::OnePassword { .. })),
-    );
+    let what = match (kind, s.map(|s| &s.locator)) {
+        (Kind::Passphrase, _) => "passphrase",
+        (Kind::Hardware, _) => "YubiKey and its PIN",
+        (Kind::Paper, Some(Locator::OnePassword { .. })) => "1Password item (Touch ID)",
+        (Kind::Paper, _) => "paper share (24 words)",
+    };
     match s {
-        Some(s) if !s.label.is_empty() => format!("{} ({what})", s.label),
-        _ => what.to_string(),
+        Some(s) => format!("{} ({what})", s.label),
+        None => what.to_string(),
     }
 }
 
@@ -83,46 +76,42 @@ fn paper_share(x: u8, s: Option<&SheetShare>) -> Result<Zeroizing<String>, Strin
     enter_paper_share(x)
 }
 
-/// The secret of the YubiKey that is share `x`. One key at a time, a failure (a key left plugged in, the
-/// wrong key, a wrong PIN) is shown and the owner asked again to plug in only that key: `--device`, which
-/// the listing error suggests, would make every key be read at one path.
+/// The secret of the YubiKey that is share `x`. The credential id on the sheet is final: if the key fails
+/// with it, the sheet may be damaged or from another record, so the owner types the id. `device` is never
+/// set when several keys are read (`check_device`).
 fn key_secret(
     x: u8,
     s: Option<&SheetShare>,
     device: Option<&str>,
     one_at_a_time: bool,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
-    let name = match s {
-        Some(s) if !s.label.is_empty() => format!(" (\"{}\")", s.label),
-        _ => String::new(),
+    let name = s.map(|s| format!(" (\"{}\")", s.label)).unwrap_or_default();
+    let mut from_sheet = match s {
+        Some(SheetShare {
+            locator: Locator::Credential(c),
+            ..
+        }) => Some(c.clone()),
+        _ => None,
     };
-    for _ in 0..TRIES {
-        if one_at_a_time {
-            pause(&format!(
-                "Plug in only the YubiKey that is share {x}{name}, then press Enter."
-            ))?;
-        }
-        let cred = match s {
-            Some(SheetShare {
-                locator: Locator::Credential(c),
-                ..
-            }) => c.clone(),
-            _ => ask(&format!(
-                "Credential id of the YubiKey that is share {x} (from your recovery sheet): "
-            ))?,
-        };
-        println!("\nEnter the PIN, then touch the YubiKey that is share {x} when it blinks.");
-        match fido::secret(&cred, device) {
-            Ok(secret) => return Ok(Zeroizing::new(secret)),
-            Err(e) if !one_at_a_time => return Err(e),
-            // fido::device_path refuses to guess between keys; the owner only has to unplug one.
-            Err(e) if e.starts_with("several FIDO2 keys found") => println!(
-                "More than one key is plugged in: unplug the other keys, leave only the YubiKey that is share {x}, and try again."
-            ),
-            Err(e) => println!("{e}"),
-        }
-    }
-    Err(format!("the YubiKey that is share {x} was not read"))
+    with_key(
+        &format!("the YubiKey that is share {x}{name}"),
+        one_at_a_time,
+        || {
+            let cred = match &from_sheet {
+                Some(c) => c.clone(),
+                None => ask(&format!(
+                    "Credential id of the YubiKey that is share {x} (from your recovery sheet): "
+                ))?,
+            };
+            println!("\nEnter the PIN, then touch the YubiKey that is share {x} when it blinks.");
+            let secret = fido::secret(&cred, device);
+            // Only a failure with the key itself spends the sheet's id, not a second key left plugged in.
+            if secret.as_ref().is_err_and(|e| !several_keys(e)) {
+                from_sheet = None;
+            }
+            secret.map(Zeroizing::new)
+        },
+    )
 }
 
 pub fn restore_flow(device: Option<String>) -> Result<(), String> {
@@ -140,15 +129,20 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     let kind = |x: u8| h.kinds[x as usize - 1];
     // The sheet is a plain file that gets copied around, so the record header decides: the first line for
     // share x is used only when x is one of the record's shares and its locator fits that share's kind.
+    // A 1Password reference is also trusted only when it names the item backup stores share x under for
+    // this record: a sheet from another backup must not make restore read that backup's share.
+    let id = record_id(&record);
     let on_sheet = |x: u8| {
-        sheet.iter().find(|s| s.x == x).filter(|s| {
-            matches!(
-                (kind(x), &s.locator),
-                (_, Locator::None)
-                    | (Kind::Hardware, Locator::Credential(_))
-                    | (Kind::Paper, Locator::OnePassword { .. })
-            )
-        })
+        sheet
+            .iter()
+            .find(|s| s.x == x)
+            .filter(|s| match (kind(x), &s.locator) {
+                (_, Locator::None) | (Kind::Hardware, Locator::Credential(_)) => true,
+                (Kind::Paper, Locator::OnePassword { reference, .. }) => {
+                    split_reference(reference).is_ok_and(|(_, t)| t == title(x, &id))
+                }
+                _ => false,
+            })
     };
 
     let held: Vec<u8> = loop {
@@ -180,8 +174,9 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
         .copied()
         .filter(|&x| kind(x) == Kind::Hardware)
         .collect();
-    // Without --device the key is found by listing, which fails with two plugged in: one at a time.
-    let one_at_a_time = keys.len() > 1 && device.is_none();
+    check_device(device.as_deref(), keys.len(), "you hold")?;
+    // The key is found by listing, which fails with two plugged in: one at a time.
+    let one_at_a_time = keys.len() > 1;
     for &x in &keys {
         let secret = key_secret(x, on_sheet(x), device.as_deref(), one_at_a_time)?;
         hardware.push((x, *secret));

@@ -1,10 +1,14 @@
 //! `publish [flags] <rpc-url> <record.hex> <refund-address>`; missing positionals are prompted for.
-//! Flags: `--verify-rpc <url>` (second RPC, read-back only), `--confirmations <n>`, `--allow-high-fees`.
+//! Flags: `--verify-rpc <url>` (second RPC, read-back only), `--confirmations <n>`, `--allow-high-fees`,
+//! `--help`, `--version`.
 use epn_publish::{FundRequest, Options, amount, parse_address, parse_record};
 use std::io::{self, Write};
 use std::time::Duration;
 
 const FUND_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const USAGE: &str = "usage: publish [--verify-rpc <url>] [--confirmations <n>] [--allow-high-fees]
+               <rpc-url> <record.hex> <refund-address>
+Missing arguments are prompted for. Also: --help, --version.";
 
 /// `println!` that ignores a closed stdout instead of panicking: once funds may have arrived, the run
 /// must reach its sweep even if the terminal is gone.
@@ -36,13 +40,21 @@ fn run() -> Result<(), String> {
                     .ok_or("--confirmations needs a number")?
             }
             "--allow-high-fees" => allow_high_fees = true,
+            "--help" | "-h" => {
+                say!("{USAGE}");
+                return Ok(());
+            }
+            "--version" => {
+                say!("publish {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             f if f.starts_with("--") => return Err(format!("unknown flag {f}")),
             _ => positional.push(a),
         }
     }
     if positional.len() > 3 {
         return Err(format!(
-            "unexpected extra argument #{}; usage: publish [flags] <rpc-url> <record.hex> <refund-address>",
+            "unexpected extra argument #{}; {USAGE}",
             positional.len()
         ));
     }
@@ -74,7 +86,7 @@ fn run() -> Result<(), String> {
             "  needs {} on chain {}; leftovers are refunded to {}",
             amount(r.required_wei),
             r.chain_id,
-            r.refund
+            refund
         );
         say!(
             "  waiting up to {} min. If this program stops before it says \"funded\", do not send.",

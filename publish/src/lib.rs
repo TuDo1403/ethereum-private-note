@@ -45,7 +45,8 @@ const READBACK_DELAY: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_secs(2);
 /// Upper bound on any single RPC request (connect + response).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const SWEEP_TRIES: u32 = 6;
+/// How long the sweep keeps retrying (failed reads included) before it gives up and the key is printed.
+const SWEEP_BUDGET: Duration = Duration::from_secs(300);
 /// How long one sweep tx may stay unmined before it is re-sent with a higher fee.
 const SWEEP_WAIT: Duration = Duration::from_secs(90);
 
@@ -137,11 +138,9 @@ async fn interrupted() {
 /// What the run produced; everything the recovery sheet needs.
 #[derive(Debug)]
 pub struct Outcome {
-    pub chain_id: u64,
     /// Where the record lives: its code is `0x00 || record`. Derived from the sender, which is not needed again.
     pub address: Address,
     pub sender: Address,
-    pub record_id: String,
     /// Wei returned to the refund address (0 if nothing was left to sweep).
     pub swept: U256,
 }
@@ -162,7 +161,6 @@ pub struct FundRequest {
     pub sender: Address,
     pub chain_id: u64,
     pub required_wei: U256,
-    pub refund: Address,
 }
 
 impl FundRequest {
@@ -351,13 +349,9 @@ async fn run(
         chain_id,
         armed: Cell::new(false),
     };
-    // `funded`: the funding wait completed. `sent`: fees of the deploy tx once sent, which the sweep must
-    // outbid to replace it if it is still pending. `sheet`: the recovery-sheet block was printed.
-    let (funded, sent, sheet) = (
-        Cell::new(false),
-        Cell::new(None::<(u128, u128)>),
-        Cell::new(false),
-    );
+    // `sent`: fees of the deploy tx once sent (so the funds arrived), which the sweep must outbid to
+    // replace it if it is still pending. `sheet`: the recovery-sheet block was printed.
+    let (sent, sheet) = (Cell::new(None::<(u128, u128)>), Cell::new(false));
 
     // From the moment funds can arrive, EVERY exit must go through the sweep below.
     let work = async {
@@ -367,7 +361,6 @@ async fn run(
             sender,
             chain_id,
             required_wei: required,
-            refund,
         };
         rescue.armed.set(true); // from here on, a payment may be on its way to `sender`
         on_fund(&req);
@@ -412,7 +405,6 @@ async fn run(
             }
             tokio::time::sleep(POLL).await;
         };
-        funded.set(true);
 
         let tx = deploy_tx
             .with_gas_limit(deploy_gas)
@@ -426,14 +418,14 @@ async fn run(
             .map_err(e("send deploy"))?
             .tx_hash();
         log!("deploy tx {hash} sent");
-        let receipt = confirmed(&provider, hash, "deploy", sender, opts.confirmations).await?;
+        let receipt = confirmed(&provider, hash, sender, opts.confirmations).await?;
         if receipt.contract_address != Some(address) {
             return Err(format!(
                 "deploy tx created {:?}, expected {address}",
                 receipt.contract_address
             ));
         }
-        // Print the sheet now: the record is on chain whatever fails after this point.
+        // Print the sheet now: the deploy is mined, so the record is on chain whatever fails after this point.
         print_sheet(chain_id, address, &id, Some(receipt.transaction_hash));
         sheet.set(true);
         read_back(&reader, address, record).await?;
@@ -457,11 +449,13 @@ async fn run(
     } else {
         Ok(U256::ZERO)
     };
+    // `sent` is set only once the funds have arrived.
+    let funded = sent.get().is_some();
     // Once the funds have arrived and the sweep has finished, nothing more is expected at `sender` and
     // the key may be forgotten. In every other case `rescue` prints it when this function returns.
     // A zero balance after funding is no proof of a finished sweep (a lagging or lying RPC can say so):
     // only a sweep that sent something lets the key go.
-    if funded.get() && swept.as_ref().is_ok_and(|v| !v.is_zero()) {
+    if funded && swept.as_ref().is_ok_and(|v| !v.is_zero()) {
         rescue.armed.set(false);
     }
 
@@ -469,22 +463,28 @@ async fn run(
     // e.g. while the sweep was being prepared (the sweep then moved on to nonce 1). Then the record IS
     // stored and the user needs the sheet. One check on the verify RPC, byte for byte.
     let mut late_note = String::new();
-    if work.is_err()
-        && sent.get().is_some()
-        && !sheet.get()
-        && reader
-            .get_code_at(address)
-            .await
-            .is_ok_and(|c| holds_record(&c, record))
-    {
-        print_sheet(chain_id, address, &id, None);
-        late_note = format!(
-            " The deploy was mined anyway: the record IS stored at {address} (sheet printed above)."
-        );
+    if work.is_err() && funded && !sheet.get() {
+        // The deploy may still be pending, or the check may be impossible: say where to look later.
+        let mut unsure = swept.is_err();
+        match reader.get_code_at(address).await {
+            Ok(c) if holds_record(&c, record) => {
+                print_sheet(chain_id, address, &id, None);
+                late_note = format!(
+                    " The deploy was mined anyway: the record IS stored at {address} (sheet printed above)."
+                );
+            }
+            Ok(_) => {}
+            Err(_) => unsure = true,
+        }
+        if unsure && late_note.is_empty() {
+            late_note = format!(
+                " The deploy was sent but not seen mined; if it lands, the record is at {address} (check with `cast code {address} --rpc-url <RPC>`)."
+            );
+        }
     }
 
     // Exit before the funds arrived, after the address was shown: a payment may still be on its way.
-    let dont_send = if !funded.get() && rescue.armed.get() {
+    let dont_send = if !funded && rescue.armed.get() {
         format!(
             " Do not send funds to {sender}: this run is over. If you already sent some, the THROWAWAY PRIVATE KEY printed above is the only way to recover them."
         )
@@ -503,10 +503,8 @@ async fn run(
     };
     match (work, swept) {
         (Ok(()), Ok(swept)) => Ok(Outcome {
-            chain_id,
             address,
             sender,
-            record_id: id,
             swept,
         }),
         (Ok(()), Err(s)) => Err(format!(
@@ -519,14 +517,17 @@ async fn run(
     }
 }
 
-/// The chain id / address / record id block for the recovery sheet, on stdout.
+/// The chain id / address / record id block for the recovery sheet, on stdout. With `tx` the deploy was
+/// just mined and the read-back is still to come; without it the code at `address` was already verified.
 fn print_sheet(chain_id: u64, address: Address, id: &str, tx: Option<B256>) {
     let mut out = std::io::stdout().lock();
-    let via = tx.map(|t| format!(" (tx {t})")).unwrap_or_default();
-    let _ = writeln!(
-        out,
-        "\nRecord stored{via}. Put these on the recovery sheet:"
-    );
+    let _ = match tx {
+        Some(tx) => writeln!(
+            out,
+            "\nDeploy mined (tx {tx}); read-back follows. Put these on the recovery sheet:"
+        ),
+        None => writeln!(out, "\nRecord stored. Put these on the recovery sheet:"),
+    };
     let _ = writeln!(out, "  chain id:  {chain_id}");
     let _ = writeln!(out, "  address:   {address}");
     let _ = writeln!(out, "  record id: {id}");
@@ -586,7 +587,6 @@ fn budget(gas_total: u64, max_fee: u128, allow_high: bool) -> Result<U256, Strin
 async fn confirmed(
     p: &impl Provider,
     hash: B256,
-    what: &str,
     sender: Address,
     confirmations: u64,
 ) -> Result<TransactionReceipt, String> {
@@ -597,7 +597,7 @@ async fn confirmed(
     let mut last = "not mined yet".to_string();
     while Instant::now() < deadline {
         match p.get_transaction_receipt(hash).await {
-            Ok(Some(r)) if !r.status() => return Err(format!("{what} tx {hash} reverted")),
+            Ok(Some(r)) if !r.status() => return Err(format!("deploy tx {hash} reverted")),
             Ok(Some(r)) => match (r.block_number, p.get_block_number().await) {
                 (Some(mined), Ok(head))
                     if head.saturating_add(1) >= mined.saturating_add(confirmations) =>
@@ -613,7 +613,7 @@ async fn confirmed(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Err(format!(
-        "{what} tx {hash} from {sender} not confirmed in time: {last}"
+        "deploy tx {hash} from {sender} not confirmed in time: {last}"
     ))
 }
 
@@ -658,7 +658,9 @@ fn bump((max_fee, tip): (u128, u128)) -> (u128, u128) {
 /// replaces the stuck deploy. The value is the mined balance minus the sweep's max cost, so the sweep pays
 /// for itself. Every failure re-reads the state and tries again: "nonce too low" or another tx mined at our
 /// nonce (the deploy won after all), an underpriced replacement or a sweep that stays unmined (fee raised
-/// another 12.5 %), insufficient funds (an L2 data fee on top of gas: reserve doubled).
+/// another 12.5 %), insufficient funds (an L2 data fee on top of gas: reserve doubled). A failed read (an
+/// RPC outage) is retried the same way; the whole sweep gets `SWEEP_BUDGET` of wall-clock time, not a fixed
+/// number of attempts, so an outage that outlasts a few attempts cannot end it with the funds still there.
 async fn sweep(
     p: &impl Provider,
     sender: Address,
@@ -670,14 +672,22 @@ async fn sweep(
     let mut floor = bump(sent);
     let mut reserve_mul = 1u64;
     let mut last = String::new();
-    for attempt in 0..SWEEP_TRIES {
+    let (deadline, mut attempt) = (Instant::now() + SWEEP_BUDGET, 0u32);
+    loop {
         if attempt > 0 {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "gave up after {} s ({attempt} attempts): {last}",
+                    SWEEP_BUDGET.as_secs()
+                ));
+            }
             log!(
                 "sweep attempt {attempt} failed, retrying: {}",
                 scrub(last.clone(), secrets)
             );
             tokio::time::sleep(POLL).await;
         }
+        attempt += 1;
         let state = async {
             let nonce = p
                 .get_transaction_count(sender)
@@ -765,7 +775,6 @@ async fn sweep(
             }
         }
     }
-    Err(format!("gave up after {SWEEP_TRIES} attempts: {last}"))
 }
 
 /// Poll for the sweep's fate: Ok(true) mined and succeeded; Ok(false) reverted, or `nonce` was used by
@@ -828,7 +837,6 @@ mod tests {
             sender: address!("00000000000000000000000000000000000000aa"),
             chain_id: 4153,
             required_wei: U256::from(7),
-            refund: Address::ZERO,
         };
         assert_eq!(
             r.uri(),
@@ -838,14 +846,6 @@ mod tests {
 
     #[test]
     fn scrub_hides_raw_and_normalized_urls() {
-        let s = secret_forms(&["https://rpc.x/key/SECRET", ""]);
-        assert!(
-            !scrub(
-                "error sending request for url (https://rpc.x/key/SECRET)".into(),
-                &s
-            )
-            .contains("SECRET")
-        );
         // reqwest prints the parsed URL: lowercase scheme and host, default port dropped.
         let s = secret_forms(&["HTTPS://RPC.X:443/key/SECRET"]);
         assert!(
@@ -895,7 +895,7 @@ mod tests {
 
     /// A well-formed 2-of-2 record (passphrase and paper): 26 header bytes, 1 masked share, nonce, ciphertext.
     fn record_bytes() -> Vec<u8> {
-        let mut r = vec![2, 0, 0, 4, 0, 3]; // version 2, m = 1024 KiB, t = 3
+        let mut r = vec![1, 0, 0, 4, 0, 3]; // version 1, m = 1024 KiB, t = 3
         r.extend([0; 16]); // salt
         r.extend([2, 2, 1, 3]); // k = 2, n = 2, kinds passphrase and paper
         r.resize(26 + 32 + 12 + 49, 0xab);
@@ -909,6 +909,6 @@ mod tests {
         assert!(parse_record(&hex).is_err()); // no 0x
         assert!(parse_record(&format!("0x{hex}00")).is_err()); // one byte too long
         assert!(parse_record(&format!("0x{hex}zz")).is_err()); // not hex
-        assert!(parse_record(&format!("0x01{}", &hex[2..])).is_err()); // wrong version byte
+        assert!(parse_record(&format!("0x02{}", &hex[2..])).is_err()); // wrong version byte
     }
 }

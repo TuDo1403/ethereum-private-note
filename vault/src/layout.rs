@@ -26,6 +26,15 @@ pub enum ShareKind {
 }
 
 impl ShareKind {
+    /// A 1Password share whose account and vault the setup screen asks for later; `Layout::new` refuses it
+    /// until they are filled in.
+    pub fn one_password() -> ShareKind {
+        ShareKind::OnePassword {
+            account: String::new(),
+            vault: String::new(),
+        }
+    }
+
     /// Fixed share order: passphrase, then YubiKeys, then paper and 1Password shares.
     fn rank(&self) -> u8 {
         match self {
@@ -50,25 +59,39 @@ pub struct Layout {
 }
 
 /// Characters a label must not hold because, printed in a prompt, they could rewrite or disguise the
-/// screen: control characters (ESC, CR, newline) and the common Unicode format characters (category Cf)
-/// that hide or reorder text (zero width and direction marks, bidi embeddings and isolates, the byte order
-/// mark; not every Cf code point, std has no category test). `sheet::parse` skips a share line whose label
-/// holds one, so `check_label` refuses the same set: a label accepted while planning must not give a sheet
-/// line that restore then ignores.
+/// screen: control characters (ESC, CR, newline) and the common Unicode format and separator characters
+/// that hide or reorder text (zero width and direction marks, bidi embeddings and isolates, line and
+/// paragraph separators, word joiners and invisible operators, soft hyphen, the byte order mark; not every
+/// Cf code point, std has no category test). `sheet::parse` skips a share line whose label holds one, so
+/// `check_label` refuses the same set: a label accepted while planning must not give a sheet line that
+/// restore then ignores.
 pub fn hides_text(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 /// Labels go on the public recovery sheet and inside the plan file's double quotes, so no quotes and
-/// nothing `hides_text` names.
+/// nothing `hides_text` names. No space at either end: a prompt never gives one, so a plan file must not.
 pub fn check_label(s: &str) -> Result<(), String> {
     let n = s.chars().count();
-    if (1..=MAX_LABEL).contains(&n) && !s.chars().any(|c| c == '"' || hides_text(c)) {
+    if (1..=MAX_LABEL).contains(&n)
+        && s == s.trim()
+        && !s.chars().any(|c| c == '"' || hides_text(c))
+    {
         Ok(())
     } else {
         Err(format!(
-            "a label must be 1 to {MAX_LABEL} characters, with no quotes, control or invisible formatting characters"
+            "a label must be 1 to {MAX_LABEL} characters, with no quotes, control or invisible formatting characters, and no space at either end"
         ))
     }
 }
@@ -154,22 +177,16 @@ impl Layout {
             .enumerate()
             .map(|(i, l)| (i + 1, l))
             .filter(|(_, l)| !l.trim().is_empty());
-        let at = |n: usize, e: String| format!("setup.txt line {n}: {e}");
+        let at = |n: usize, e: String| format!("line {n}: {e}");
 
         match lines.next() {
             Some((_, PLAN_HEADER)) => {}
-            _ => {
-                return Err(format!(
-                    "setup.txt: the first line must be \"{PLAN_HEADER}\""
-                ));
-            }
+            _ => return Err(format!("the first line must be \"{PLAN_HEADER}\"")),
         }
-        let (n, line) = lines
-            .next()
-            .ok_or("setup.txt: the line \"k <number>\" is missing")?;
+        let (n, line) = lines.next().ok_or("the line \"k <number>\" is missing")?;
         let k = line
             .strip_prefix("k ")
-            .and_then(|v| v.parse::<usize>().ok())
+            .and_then(number)
             .ok_or_else(|| at(n, "expected \"k <number>\"".into()))?;
 
         let mut shares = Vec::new();
@@ -184,15 +201,41 @@ impl Layout {
             shares.push(share);
         }
 
-        let layout = Layout::new(k, shares.clone()).map_err(|e| format!("setup.txt: {e}"))?;
+        let layout = Layout::new(k, shares.clone())?;
         if layout.shares != shares {
             return Err(
-                "setup.txt: shares must be in the fixed order: passphrase, then YubiKeys, then paper and 1Password"
+                "shares must be in the fixed order: passphrase, then YubiKeys, then paper and 1Password"
                     .into(),
             );
         }
         Ok(layout)
     }
+}
+
+/// Every k-subset of `0..n`, in lexicographic order.
+pub fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    fn extend(start: usize, n: usize, k: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if cur.len() == k {
+            out.push(cur.clone());
+            return;
+        }
+        for i in start..n {
+            cur.push(i);
+            extend(i + 1, n, k, cur, out);
+            cur.pop();
+        }
+    }
+    let mut out = Vec::new();
+    extend(0, n, k, &mut Vec::new(), &mut out);
+    out
+}
+
+/// A number written with ASCII digits only: `str::parse` also takes a leading `+`.
+fn number(s: &str) -> Option<usize> {
+    s.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| s.parse().ok())
+        .flatten()
 }
 
 /// `share <x> <kind> "<label>"`, plus ` account <account> vault "<vault>"` for 1Password. Errors never
@@ -203,21 +246,17 @@ fn parse_share(line: &str) -> Result<(usize, ShareSpec), String> {
         .strip_prefix("share ")
         .and_then(|r| r.split_once(' '))
         .ok_or_else(bad)?;
-    let x: usize = x.parse().map_err(|_| bad())?;
+    let x = number(x).ok_or_else(bad)?;
     let (kind, rest) = rest.split_once(' ').ok_or_else(bad)?;
     let (label, rest) = quoted(rest)?;
-    let kind = match kind {
-        "passphrase" | "yubikey" | "paper" => {
-            if !rest.is_empty() {
-                return Err("unexpected text after the label".into());
-            }
-            match kind {
-                "passphrase" => ShareKind::Passphrase,
-                "yubikey" => ShareKind::YubiKey,
-                _ => ShareKind::Paper,
-            }
+    let kind = match (kind, rest) {
+        ("passphrase", "") => ShareKind::Passphrase,
+        ("yubikey", "") => ShareKind::YubiKey,
+        ("paper", "") => ShareKind::Paper,
+        ("passphrase" | "yubikey" | "paper", _) => {
+            return Err("unexpected text after the label".into());
         }
-        "1password" => {
+        ("1password", _) => {
             let needs =
                 || "a 1password share needs: account <account> vault \"<vault>\"".to_string();
             let (account, rest) = rest
@@ -277,13 +316,7 @@ pub fn presets() -> Vec<(usize, Vec<ShareSpec>)> {
             2,
             vec![
                 passphrase(),
-                s(
-                    ShareKind::OnePassword {
-                        account: String::new(),
-                        vault: String::new(),
-                    },
-                    "1Password",
-                ),
+                s(ShareKind::one_password(), "1Password"),
                 s(ShareKind::Paper, "paper"),
             ],
         ),
@@ -402,9 +435,12 @@ mod tests {
             "",
             "epn setup v2\nk 2\n",
             "epn setup v1\nk 2\n", // no shares
-            "epn setup v1\nk 2\nshare 1 yubikey \"a\nshare 2 paper \"b\"\n", // open quote
-            "epn setup v1\nk 2\nshare 2 paper \"a\"\nshare 1 paper \"b\"\n", // out of order
-            "epn setup v1\nk 2\nshare 1 laser \"a\"\nshare 2 paper \"b\"\n", // unknown kind
+            "epn setup v1\nk +2\nshare 1 paper \"a\"\nshare 2 paper \"b\"\n", // a sign is not a digit
+            "epn setup v1\nk 2\nshare +1 paper \"a\"\nshare 2 paper \"b\"\n",
+            "epn setup v1\nk 2\nshare 1 paper \" a\"\nshare 2 paper \"b\"\n", // space at the end of a label
+            "epn setup v1\nk 2\nshare 1 yubikey \"a\nshare 2 paper \"b\"\n",  // open quote
+            "epn setup v1\nk 2\nshare 2 paper \"a\"\nshare 1 paper \"b\"\n",  // out of order
+            "epn setup v1\nk 2\nshare 1 laser \"a\"\nshare 2 paper \"b\"\n",  // unknown kind
             // valid shares, but paper before YubiKey is not the fixed order
             "epn setup v1\nk 2\nshare 1 paper \"a\"\nshare 2 yubikey \"b\"\n",
             // trailing junk after a quoted label
@@ -416,21 +452,43 @@ mod tests {
             "epn setup v1\nk 2\nshare 1 paper \"a\x1b[2J\"\nshare 2 paper \"b\"\n",
         ] {
             let e = Layout::parse_plan(bad).unwrap_err();
-            assert!(!e.is_empty(), "{bad:?}");
             // the file's text is never echoed: nothing in an error can rewrite the screen
             assert!(!e.chars().any(hides_text), "{bad:?} gave {e:?}");
         }
         let e = Layout::parse_plan("epn setup v1\nk 2\nshare 1 \x1b[2J \"a\"\n").unwrap_err();
-        assert!(e.starts_with("setup.txt line 3: unknown share kind"), "{e}");
-        assert!(
-            check_label("a\"b").is_err()
-                && check_label("a\nb").is_err()
-                && check_label("").is_err()
-        );
+        assert!(e.starts_with("line 3: unknown share kind"), "{e}");
+    }
+
+    #[test]
+    fn labels_are_checked() {
+        assert!(check_label("a\"b").is_err() && check_label("").is_err());
         assert!(check_label(&"x".repeat(41)).is_err() && check_label(&"x".repeat(40)).is_ok());
-        // exactly what sheet::parse skips: ESC, CR, a bidi override, a zero width space
-        for bad in ["a\x1bb", "a\rb", "a\u{202E}b", "a\u{200B}b", "a\u{FEFF}b"] {
+        assert!(check_label("Tante Hélène's key").is_ok());
+        // spaces at the ends, ESC, CR, and one of each other kind of hidden character
+        for bad in [
+            " a",
+            "a ",
+            "a\x1bb",
+            "a\rb",
+            "a\u{00AD}b",
+            "a\u{061C}b",
+            "a\u{180E}b",
+            "a\u{200B}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "a\u{202E}b",
+            "a\u{2060}b",
+            "a\u{2064}b",
+            "a\u{2066}b",
+            "a\u{FEFF}b",
+        ] {
             assert!(check_label(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn combinations_are_k_subsets_in_order() {
+        assert_eq!(combinations(5, 3).len(), 10);
+        assert_eq!(combinations(3, 2), vec![vec![0, 1], vec![0, 2], vec![1, 2]]);
     }
 }

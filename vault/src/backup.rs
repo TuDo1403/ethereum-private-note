@@ -10,10 +10,9 @@
 //! temporary paper, and `vault op-store` (`op_store` below) types it into 1Password later, on an online
 //! machine that never sees the seed or any other share.
 
-use crate::layout::{Layout, ShareKind};
+use crate::layout::{Layout, ShareKind, combinations};
 use crate::onepassword;
 use crate::prompt::*;
-use crate::score::combinations;
 use crate::setup;
 use crate::sheet::{self, Locator};
 use epn_core::bip39::{entropy_to_words, new_passphrase, words_to_entropy};
@@ -23,50 +22,46 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-/// Make the user prove the passphrase is written down, exactly: restore normalises Unicode (NFKD) but not
-/// case or spaces.
-fn confirm_passphrase(pass: &str) -> Result<(), String> {
+/// Makes the user prove a secret is written down: typed back from the paper it must match exactly (restore
+/// normalises Unicode (NFKD) but not case or spaces). A paper share needs all 24 words, not a quiz on a few: a
+/// miswritten word would pass, and a paper share has no other check until the day it is needed. A miss, or
+/// a paper that cannot be typed at all (`typed` fails), shows the words again; the screen is cleared when
+/// the tries run out.
+fn confirm(
+    what: &str,
+    intro: &str,
+    words: &str,
+    mut typed: impl FnMut() -> Result<Zeroizing<String>, String>,
+) -> Result<(), String> {
     for _ in 0..TRIES {
         clear();
-        println!(
-            "Now type the passphrase from your paper (hidden). It must match exactly: lowercase, one space between words."
-        );
-        if *ask_hidden("passphrase: ")? == pass {
+        println!("{intro}");
+        if typed().is_ok_and(|t| *t == words) {
             return Ok(());
         }
-        println!("That did not match.");
-        show_words("Here it is again (write it down carefully):", pass);
-        pause("Press Enter to try again.")?;
-    }
-    Err("passphrase not confirmed; nothing was saved".into())
-}
-
-/// All 24 words must be typed back from the paper and match: a quiz on a few words would let a
-/// miswritten word through, and a paper share has no other check until the day it is needed.
-fn confirm_paper_share(x: u8, words: &str) -> Result<(), String> {
-    for _ in 0..TRIES {
-        clear();
-        println!("Now type share {x} back from your paper, all 24 words (hidden).");
-        if *enter_paper_share(x)? == words {
-            return Ok(());
-        }
-        println!("That is not the share shown: some word on the paper is wrong or out of order.");
+        println!("That did not match: some word on the paper is wrong, out of order or misspelt.");
         show_words(
-            &format!("Share {x} again (correct the paper carefully):"),
+            &format!("{what} again (correct the paper carefully):"),
             words,
         );
-        pause("Press Enter to type it again.")?;
+        pause("Press Enter to try again.")?;
     }
-    Err("paper share not confirmed".into())
+    clear();
+    Err(format!("{what} not confirmed"))
 }
 
-/// Every file written after a secret was shown goes through here: synced to disk, so a crash right after
-/// cannot lose it, and a failure says plainly that the papers already written belong to no backup.
+/// Every file written after a secret was shown goes through here: the file and its folder are synced to
+/// disk, so a crash right after cannot lose it, and a failure says plainly that the papers already written
+/// belong to no backup.
 fn save(path: &str, contents: &str) -> Result<(), String> {
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::File::create(path)?;
         f.write_all(contents.as_bytes())?;
-        f.sync_all()
+        f.sync_all()?;
+        let folder = std::path::Path::new(path)
+            .parent()
+            .expect("a file in a folder");
+        std::fs::File::open(folder)?.sync_all()
     };
     write().map_err(|e| {
         format!("cannot write {path}: {e}\nThe backup is NOT saved. Destroy the papers written in this run (the passphrase, and any share already shown) and start again.")
@@ -117,6 +112,7 @@ fn output_dir() -> Result<String, String> {
     let probe = format!("{dir}/.write-test");
     std::fs::write(&probe, "test")
         .and_then(|_| std::fs::remove_file(&probe))
+        .and_then(|_| std::fs::File::open(".")?.sync_all()) // the new folder's entry survives a crash
         .map_err(|e| format!("cannot write in {dir}: {e}"))?;
     Ok(dir)
 }
@@ -173,14 +169,6 @@ fn build_record(
     Ok((record, paper))
 }
 
-fn paper_words(paper: &Shares, x: u8) -> Zeroizing<String> {
-    let share = paper
-        .iter()
-        .find(|s| s.0 == x)
-        .expect("seal returns every paper share");
-    Zeroizing::new(entropy_to_words(&share.1))
-}
-
 /// One YubiKey share: its credential (made now or pasted) and its secret. A missing or wrong key, two keys
 /// plugged in or a wrong PIN is retried here, before the seed is typed. `earlier` holds the (label,
 /// credential id) of the YubiKey shares already done.
@@ -190,39 +178,41 @@ fn yubikey_share(
     device: Option<&str>,
     one_at_a_time: bool,
 ) -> Result<(String, Zeroizing<[u8; 32]>), String> {
-    for _ in 0..TRIES {
-        if one_at_a_time {
-            pause(&format!("Plug in only {label}, then press Enter."))?;
-        }
-        match try_yubikey(label, earlier, device) {
-            Ok(done) => return Ok(done),
-            // fido::device_path refuses to guess between keys; the owner only has to unplug one.
-            Err(e) if e.starts_with("several FIDO2 keys found") => println!(
-                "More than one key is plugged in: unplug the other keys, leave only {label}, and try again."
-            ),
-            Err(e) => println!("{e}"),
-        }
-    }
-    Err(format!("{label} was not set up; nothing was saved"))
+    // A credential made here stays on the key through a retry (a wrong PIN, a missed touch): enrolling
+    // again would leave one more unused credential on it.
+    let mut made = None;
+    with_key(label, one_at_a_time, || {
+        try_yubikey(label, earlier, device, &mut made)
+    })
 }
 
 fn try_yubikey(
     label: &str,
     earlier: &[(&str, &str)],
     device: Option<&str>,
+    made: &mut Option<String>,
 ) -> Result<(String, Zeroizing<[u8; 32]>), String> {
-    let pasted = ask(&format!(
-        "Paste the credential id if {label} already has one from `vault`, or press Enter to make a new one: "
-    ))?;
-    let made = pasted.is_empty();
-    let cred = if made {
-        println!("Making a credential: enter the YubiKey PIN, then touch the key when it blinks.");
-        let new = fido::enroll(device)?;
-        println!("credential id: {new}\n(it is saved on the recovery sheet; it is not secret)");
-        new
-    } else {
-        fido::check_cred_id(&pasted)?; // a typo is found now, not after the seed and the papers
-        pasted
+    let cred = match made.clone() {
+        Some(cred) => cred,
+        None => {
+            let pasted = ask(&format!(
+                "Paste the credential id if {label} already has one from `vault`, or press Enter to make a new one: "
+            ))?;
+            if pasted.is_empty() {
+                println!(
+                    "Making a credential: enter the YubiKey PIN, then touch the key when it blinks."
+                );
+                let new = fido::enroll(device)?;
+                println!(
+                    "credential id: {new}\n(it is saved on the recovery sheet; it is not secret)"
+                );
+                *made = Some(new.clone());
+                new
+            } else {
+                fido::check_cred_id(&pasted)?; // a typo is found now, not after the seed and the papers
+                pasted
+            }
+        }
     };
     if let Some((other, _)) = earlier.iter().find(|(_, c)| *c == cred) {
         return Err(format!(
@@ -234,31 +224,35 @@ fn try_yubikey(
     // calls the setup strong. The key's listing must hold this share's credential and none of an earlier
     // share's. It is asked for only once this share's credential exists: on a key with no credential for the
     // rp id the tool may fail, not list nothing. The first key needs no listing: `fido::secret` below fails
-    // for a pasted id that is not on it.
+    // for a pasted id that is not on it. A credential found on the wrong key is dropped: the next try makes
+    // a new one on the right key.
     if !earlier.is_empty() {
         println!("Checking which key this is: enter the YubiKey PIN (no touch needed).");
         let listed = fido::credentials(device)?;
-        let unused = if made {
+        let unused = if made.is_some() {
             " (the credential just made on it is unused and does no harm)"
         } else {
             ""
         };
-        if let Some((other, _)) = earlier.iter().find(|(_, c)| listed.iter().any(|l| l == c)) {
-            return Err(format!(
+        let wrong = match earlier.iter().find(|(_, c)| listed.iter().any(|l| l == c)) {
+            Some((other, _)) => Some(format!(
                 "this is the same key as {other}; plug in {label}{unused}"
-            ));
-        }
-        if !listed.contains(&cred) {
-            return Err(format!(
+            )),
+            None if !listed.contains(&cred) => Some(format!(
                 "credential {cred} is not on this key: plug in {label}, or paste the id made on it"
-            ));
+            )),
+            None => None,
+        };
+        if let Some(e) = wrong {
+            *made = None;
+            return Err(e);
         }
     }
     println!("Enter the YubiKey PIN, then touch the key when it blinks.");
     let secret = Zeroizing::new(fido::secret(&cred, device).map_err(|e| {
         // Unlisted, a pasted id may simply not be on this key: the tool's failure cannot tell that from a
         // wrong PIN, so both are named.
-        if !made && earlier.is_empty() && e.starts_with("fido2-assert failed") {
+        if made.is_none() && earlier.is_empty() && e.starts_with("fido2-assert failed") {
             format!(
                 "{e}\nIf the PIN was right, this credential id is not on the plugged-in key: plug in {label}, or paste the id made on it."
             )
@@ -275,7 +269,10 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         Some(path) => {
             let text =
                 std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-            Some((path, Layout::parse_plan(&text)?))
+            Some((
+                path,
+                Layout::parse_plan(&text).map_err(|e| format!("{path}: {e}"))?,
+            ))
         }
         None => None,
     };
@@ -301,12 +298,8 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         .iter()
         .filter(|s| s.kind == ShareKind::YubiKey)
         .count();
-    if device.is_some() && yubikeys > 1 {
-        return Err(format!(
-            "--device names one key, but this setup has {yubikeys} YubiKeys: run it without --device, and \
-             plug in one key at a time when asked. Nothing was made."
-        ));
-    }
+    check_device(device.as_deref(), yubikeys, "this setup has")
+        .map_err(|e| format!("{e}. Nothing was made."))?;
     let dir = output_dir()?;
 
     let (n, k) = (layout.n(), layout.k);
@@ -387,7 +380,13 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         show_words("passphrase:", &pass);
         println!();
         pause("Press Enter once it is written down; the screen will be cleared.")?;
-        confirm_passphrase(&pass)?;
+        confirm(
+            "Passphrase",
+            "Now type the passphrase from your paper (hidden). It must match exactly: lowercase, one space between words.",
+            &pass,
+            || ask_hidden("passphrase: "),
+        )
+        .map_err(|e| format!("{e}; nothing was saved"))?;
         Some(pass)
     } else {
         None
@@ -411,9 +410,14 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
     )?;
     println!("Saved two PUBLIC files in ./{dir}/ : record.hex and recovery-sheet.txt");
 
-    for &i in &papers {
-        let x = i as u8 + 1;
-        let words = paper_words(&paper, x);
+    for (&i, (x, share)) in papers.iter().zip(paper.iter()) {
+        let x = *x;
+        assert_eq!(
+            x as usize,
+            i + 1,
+            "seal returns the paper shares in share order"
+        );
+        let words = Zeroizing::new(entropy_to_words(share));
         println!();
         let title = if let ShareKind::OnePassword { .. } = layout.shares[i].kind {
             heading(
@@ -439,7 +443,13 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         show_words(&title, &words);
         println!();
         pause("Press Enter once it is written down; you will type all 24 words back.")?;
-        confirm_paper_share(x, &words).map_err(|e| {
+        confirm(
+            &format!("Share {x}"),
+            &format!("Now type share {x} back from your paper, all 24 words (hidden)."),
+            &words,
+            || enter_paper_share(x),
+        )
+        .map_err(|e| {
             format!("{e}. This backup is NOT usable: delete ./{dir}/, destroy every paper written in this run, and start again.")
         })?;
         clear();
@@ -499,7 +509,7 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
 pub fn op_store(sheet_path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(sheet_path)
         .map_err(|e| format!("cannot read {sheet_path}: {e}"))?;
-    // (x, label, reference, account) of each 1Password share; old sheets name share 2 with no label.
+    // (x, label, reference, account) of each 1Password share.
     let mut shares: Vec<(u8, String, String, String)> = sheet::parse(&text)
         .into_iter()
         .filter_map(|s| match s.locator {
