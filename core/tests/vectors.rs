@@ -3,16 +3,25 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use epn_core::bip39::{entropy_to_words, words_to_entropy};
 use epn_core::record::*;
 use epn_core::{hex, os_random, unhex};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 2-of-3: passphrase (x=1), YubiKey (x=2), paper (x=3): the layout `vault` makes.
 fn header_2_of_3(m: u32, t: u8, salt: &[u8]) -> Vec<u8> {
-    new_header(m, t, salt, 2, &[Kind::Passphrase, Kind::Hardware, Kind::Paper]).unwrap()
+    new_header(
+        m,
+        t,
+        salt,
+        2,
+        &[Kind::Passphrase, Kind::Hardware, Kind::Paper],
+    )
+    .unwrap()
 }
 
 /// Deterministic "randomness": byte i is (step * i + start) mod 256. Not random, which is the point.
 fn pattern(start: u8, step: u8, n: usize) -> Vec<u8> {
-    (0..n).map(|i| (step as usize * i + start as usize) as u8).collect()
+    (0..n)
+        .map(|i| (step as usize * i + start as usize) as u8)
+        .collect()
 }
 
 fn kind_name(k: Kind) -> String {
@@ -24,11 +33,31 @@ fn arr(v: &Value) -> [u8; 32] {
 }
 
 /// name, m, t, k, kinds, passphrase, entropy, random start, hardware secret start
-type Spec = (&'static str, u32, u8, usize, &'static [Kind], &'static str, &'static str, u8, u8);
+type Spec = (
+    &'static str,
+    u32,
+    u8,
+    usize,
+    &'static [Kind],
+    &'static str,
+    &'static str,
+    u8,
+    u8,
+);
 use Kind::{Hardware as H, Paper as P, Passphrase as S};
 
 const SPECS: [Spec; 10] = [
-    ("fast-2-of-3-12-words", 1024, 1, 2, &[S, H, P], "correct horse battery staple", "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f", 0x03, 0x40),
+    (
+        "fast-2-of-3-12-words",
+        1024,
+        1,
+        2,
+        &[S, H, P],
+        "correct horse battery staple",
+        "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+        0x03,
+        0x40,
+    ),
     (
         "fast-3-of-5-24-words-unicode-passphrase",
         1024,
@@ -40,18 +69,98 @@ const SPECS: [Spec; 10] = [
         0x05,
         0x50,
     ),
-    ("fast-2-of-2-no-paper", 1024, 1, 2, &[S, H], "correct horse battery staple", "00112233445566778899aabbccddeeff", 0x07, 0x60),
-    ("real-parameters-2-of-3-12-words", 1 << 20, 3, 2, &[S, H, P], "correct horse battery staple", "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f", 0x03, 0x40),
+    (
+        "fast-2-of-2-no-paper",
+        1024,
+        1,
+        2,
+        &[S, H],
+        "correct horse battery staple",
+        "00112233445566778899aabbccddeeff",
+        0x07,
+        0x60,
+    ),
+    (
+        "real-parameters-2-of-3-12-words",
+        1 << 20,
+        3,
+        2,
+        &[S, H, P],
+        "correct horse battery staple",
+        "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+        0x03,
+        0x40,
+    ),
     // k >= 4 pins the Lagrange weights for 4 and 5 points; all-paper is a valid record with no masked shares.
-    ("fast-4-of-5-24-bytes", 1024, 1, 4, &[S, H, H, P, P], "correct horse battery staple", "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a", 0x09, 0x70),
-    ("fast-5-of-5-20-bytes", 1024, 1, 5, &[S, H, H, P, P], "correct horse battery staple", "000102030405060708090a0b0c0d0e0f10111213", 0x0b, 0x80),
-    ("fast-3-of-4-all-paper", 1024, 1, 3, &[P, P, P, P], "", "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5", 0x0d, 0x90),
+    (
+        "fast-4-of-5-24-bytes",
+        1024,
+        1,
+        4,
+        &[S, H, H, P, P],
+        "correct horse battery staple",
+        "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        0x09,
+        0x70,
+    ),
+    (
+        "fast-5-of-5-20-bytes",
+        1024,
+        1,
+        5,
+        &[S, H, H, P, P],
+        "correct horse battery staple",
+        "000102030405060708090a0b0c0d0e0f10111213",
+        0x0b,
+        0x80,
+    ),
+    (
+        "fast-3-of-4-all-paper",
+        1024,
+        1,
+        3,
+        &[P, P, P, P],
+        "",
+        "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        0x0d,
+        0x90,
+    ),
     // Layout pins: masked shares are stored in increasing x with paper shares skipped, and a pad's label
     // is the share's x, not its position among masked shares (here the passphrase is x=3, stored first
     // or second). The last record holds only hardware shares.
-    ("fast-2-of-3-paper-first-passphrase-last", 1024, 1, 2, &[P, H, S], "correct horse battery staple", "0123456789abcdef0123456789abcdef", 0x0f, 0xa0),
-    ("fast-3-of-4-paper-between-on-chain-28-bytes", 1024, 1, 3, &[H, P, S, P], "correct horse battery staple", "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafb", 0x11, 0xb0),
-    ("fast-2-of-3-hardware-only", 1024, 1, 2, &[H, H, H], "", "fedcba9876543210fedcba9876543210", 0x13, 0xc0),
+    (
+        "fast-2-of-3-paper-first-passphrase-last",
+        1024,
+        1,
+        2,
+        &[P, H, S],
+        "correct horse battery staple",
+        "0123456789abcdef0123456789abcdef",
+        0x0f,
+        0xa0,
+    ),
+    (
+        "fast-3-of-4-paper-between-on-chain-28-bytes",
+        1024,
+        1,
+        3,
+        &[H, P, S, P],
+        "correct horse battery staple",
+        "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafb",
+        0x11,
+        0xb0,
+    ),
+    (
+        "fast-2-of-3-hardware-only",
+        1024,
+        1,
+        2,
+        &[H, H, H],
+        "",
+        "fedcba9876543210fedcba9876543210",
+        0x13,
+        0xc0,
+    ),
 ];
 
 /// Records every decoder must refuse, made from the first vector, each with that vector's factors
@@ -73,10 +182,19 @@ fn invalid_vectors(record: &[u8], factors: &[(u8, [u8; 32])], random: &[u8]) -> 
     plain[32] = 1;
     let ct = Aes256Gcm::new_from_slice(&random[..32])
         .unwrap()
-        .encrypt(Nonce::from_slice(&record[nonce_at..nonce_at + 12]), Payload { msg: &plain, aad: &record[..h.header_len()] })
+        .encrypt(
+            Nonce::from_slice(&record[nonce_at..nonce_at + 12]),
+            Payload {
+                msg: &plain,
+                aad: &record[..h.header_len()],
+            },
+        )
         .unwrap();
     let padded = [&record[..nonce_at + 12], &ct[..]].concat();
-    let factors: Vec<Value> = factors.iter().map(|(x, v)| json!({"x": x, "value": hex(v)})).collect();
+    let factors: Vec<Value> = factors
+        .iter()
+        .map(|(x, v)| json!({"x": x, "value": hex(v)}))
+        .collect();
     [
         ("invalid-two-passphrase-shares", two_pass, "at most one passphrase share"),
         ("invalid-argon2-m-above-cap", big_m, "refusing"),
@@ -99,7 +217,11 @@ fn generate() {
     for (name, m, t, k, kinds, passphrase, entropy, rnd, hw) in SPECS {
         let header = new_header(m, t, &pattern(0xa0, 1, 16), k, kinds).unwrap();
         let has_pass = kinds.contains(&S);
-        let argon = if has_pass { stretch_passphrase(passphrase, &header).unwrap() } else { [0; 32] };
+        let argon = if has_pass {
+            stretch_passphrase(passphrase, &header).unwrap()
+        } else {
+            [0; 32]
+        };
         let random = pattern(rnd, 7, 32 * k + 12);
         let mut off = 0;
         let mut take = |n: usize| {
@@ -141,28 +263,45 @@ fn generate() {
         }));
     }
     out.extend(invalid);
-    std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/../vectors.json"), serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
+    std::fs::write(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../vectors.json"),
+        serde_json::to_string_pretty(&out).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 /// The valid vectors, then (with `error`) the records that must be refused.
 fn all_vectors() -> Vec<Value> {
     // Read at run time, not include_str!, so `generate` can build before the file exists.
-    serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../vectors.json")).unwrap()).unwrap()
+    serde_json::from_str(
+        &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../vectors.json")).unwrap(),
+    )
+    .unwrap()
 }
 
 fn vectors() -> Vec<Value> {
-    all_vectors().into_iter().filter(|v| v.get("error").is_none()).collect()
+    all_vectors()
+        .into_iter()
+        .filter(|v| v.get("error").is_none())
+        .collect()
 }
 
 #[test]
 fn refuses_every_invalid_vector() {
-    let invalid: Vec<Value> = all_vectors().into_iter().filter(|v| v.get("error").is_some()).collect();
+    let invalid: Vec<Value> = all_vectors()
+        .into_iter()
+        .filter(|v| v.get("error").is_some())
+        .collect();
     assert_eq!(invalid.len(), 4);
     for v in &invalid {
         let name = v["name"].as_str().unwrap();
         let record = unhex(v["record"].as_str().unwrap()).unwrap();
-        let factors: Vec<(u8, [u8; 32])> =
-            v["factors"].as_array().unwrap().iter().map(|f| (f["x"].as_u64().unwrap() as u8, arr(&f["value"]))).collect();
+        let factors: Vec<(u8, [u8; 32])> = v["factors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["x"].as_u64().unwrap() as u8, arr(&f["value"])))
+            .collect();
         let e = unseal(&record, &factors).unwrap_err();
         assert!(e.contains(v["error"].as_str().unwrap()), "{name}: {e}");
         // The user-facing path refuses too, before any slow work.
@@ -175,9 +314,25 @@ fn refuses_every_invalid_vector() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|s| (s["x"].as_u64().unwrap() as u8, arr(if s["kind"] == "paper" { &s["share"] } else { &s["pad"] })))
+        .map(|s| {
+            (
+                s["x"].as_u64().unwrap() as u8,
+                arr(if s["kind"] == "paper" {
+                    &s["share"]
+                } else {
+                    &s["pad"]
+                }),
+            )
+        })
         .collect();
-    assert_eq!(invalid_vectors(&record, &factors, &unhex(v["random"].as_str().unwrap()).unwrap()), invalid);
+    assert_eq!(
+        invalid_vectors(
+            &record,
+            &factors,
+            &unhex(v["random"].as_str().unwrap()).unwrap()
+        ),
+        invalid
+    );
 }
 
 #[test]
@@ -196,28 +351,56 @@ fn reproduces_every_vector() {
 
         // Intermediate values first, so a failure says which step disagrees.
         let has_pass = h.kinds.contains(&S);
-        let argon = if has_pass { stretch_passphrase(f("passphrase"), header).unwrap() } else { [0; 32] };
-        assert_eq!(has_pass.then(|| hex(argon)).as_deref(), v["argon2id_out"].as_str(), "{name}: argon2id");
+        let argon = if has_pass {
+            stretch_passphrase(f("passphrase"), header).unwrap()
+        } else {
+            [0; 32]
+        };
+        assert_eq!(
+            has_pass.then(|| hex(argon)).as_deref(),
+            v["argon2id_out"].as_str(),
+            "{name}: argon2id"
+        );
         // Pads of on-chain shares and shares of paper shares, by x; plus the raw factors a person holds.
         let (mut factors, mut hardware, mut paper) = (Vec::new(), Vec::new(), Vec::new());
         for s in v["shares"].as_array().unwrap() {
             let x = s["x"].as_u64().unwrap() as u8;
-            assert_eq!(s["kind"].as_str().unwrap(), kind_name(h.kinds[x as usize - 1]), "{name}: kind of {x}");
+            assert_eq!(
+                s["kind"].as_str().unwrap(),
+                kind_name(h.kinds[x as usize - 1]),
+                "{name}: kind of {x}"
+            );
             match s["kind"].as_str().unwrap() {
                 "passphrase" => {
-                    assert_eq!(hex(pad(&argon, header, x)), s["pad"].as_str().unwrap(), "{name}: pad {x}");
+                    assert_eq!(
+                        hex(pad(&argon, header, x)),
+                        s["pad"].as_str().unwrap(),
+                        "{name}: pad {x}"
+                    );
                     factors.push((x, arr(&s["pad"])));
                 }
                 "hardware" => {
                     let secret = arr(&s["secret"]);
-                    assert_eq!(hex(pad(&secret, header, x)), s["pad"].as_str().unwrap(), "{name}: pad {x}");
+                    assert_eq!(
+                        hex(pad(&secret, header, x)),
+                        s["pad"].as_str().unwrap(),
+                        "{name}: pad {x}"
+                    );
                     factors.push((x, arr(&s["pad"])));
                     hardware.push((x, secret));
                 }
                 _ => {
                     let words = s["words"].as_str().unwrap();
-                    assert_eq!(hex(words_to_entropy(words).unwrap()), s["share"].as_str().unwrap(), "{name}: words {x}");
-                    assert_eq!(entropy_to_words(&arr(&s["share"])), words, "{name}: encoding {x}");
+                    assert_eq!(
+                        hex(words_to_entropy(words).unwrap()),
+                        s["share"].as_str().unwrap(),
+                        "{name}: words {x}"
+                    );
+                    assert_eq!(
+                        entropy_to_words(&arr(&s["share"])),
+                        words,
+                        "{name}: encoding {x}"
+                    );
                     factors.push((x, arr(&s["share"])));
                     paper.push((x, words));
                 }
@@ -232,7 +415,11 @@ fn reproduces_every_vector() {
             rnd[off - n..off].to_vec()
         };
         let entropy = unhex(f("entropy")).unwrap();
-        let pads: Vec<_> = factors.iter().filter(|(x, _)| h.kinds[*x as usize - 1] != Kind::Paper).copied().collect();
+        let pads: Vec<_> = factors
+            .iter()
+            .filter(|(x, _)| h.kinds[*x as usize - 1] != Kind::Paper)
+            .copied()
+            .collect();
         let (sealed, sealed_paper) = seal(header, &pads, &entropy, &mut take).unwrap();
         assert_eq!(hex(&sealed), f("record"), "{name}: seal");
         assert_eq!(off, rnd.len(), "{name}: all random bytes used");
@@ -243,7 +430,10 @@ fn reproduces_every_vector() {
         // Every subset of size k or more of all n factors opens it, through the pads (no Argon2).
         let n = factors.len();
         for mask in 1u32..1 << n {
-            let subset: Vec<_> = (0..n).filter(|i| mask >> i & 1 == 1).map(|i| factors[i]).collect();
+            let subset: Vec<_> = (0..n)
+                .filter(|i| mask >> i & 1 == 1)
+                .map(|i| factors[i])
+                .collect();
             let r = unseal(&record, &subset);
             if subset.len() >= h.k {
                 let (e, used) = r.unwrap_or_else(|e| panic!("{name}: subset {mask:b}: {e}"));
@@ -266,7 +456,12 @@ fn reproduces_every_vector() {
         // ... and k factors with one wrong cannot open it.
         let mut bad: Vec<_> = factors[..h.k].to_vec();
         bad[0].1[0] ^= 1;
-        assert!(unseal(&record, &bad).unwrap_err().contains("decryption failed"), "{name}: k with one wrong");
+        assert!(
+            unseal(&record, &bad)
+                .unwrap_err()
+                .contains("decryption failed"),
+            "{name}: k with one wrong"
+        );
 
         // Tampering with the header (k, n, a kind, m, t, salt, version) never opens the record.
         for i in 0..h.header_len() {
@@ -278,13 +473,23 @@ fn reproduces_every_vector() {
         let mut t = record.clone();
         t[22] = if h.k == 2 { 3.min(n as u8) } else { 2 };
         if t[22] as usize != h.k {
-            assert!(unseal(&t, &factors).unwrap_err().contains("decryption failed"), "{name}: k tampered");
+            assert!(
+                unseal(&t, &factors)
+                    .unwrap_err()
+                    .contains("decryption failed"),
+                "{name}: k tampered"
+            );
         }
         // Swapping two kinds of equal on-chain-ness changes only the AAD (layout stays valid).
         if h.kinds[0] == Kind::Passphrase && h.kinds[1] == Kind::Hardware {
             let mut t = record.clone();
             t[24..26].swap(0, 1);
-            assert!(unseal(&t, &factors).unwrap_err().contains("decryption failed"), "{name}: kinds swapped");
+            assert!(
+                unseal(&t, &factors)
+                    .unwrap_err()
+                    .contains("decryption failed"),
+                "{name}: kinds swapped"
+            );
         }
         // Tampering with the ciphertext and nonce fails too.
         for i in [record.len() - 1, record.len() - 49, record.len() - 61] {
@@ -303,20 +508,43 @@ fn reproduces_every_vector() {
             assert_eq!(words, f("mnemonic"), "{name}: without passphrase");
         }
         // Too few, a factor at an x of the wrong kind, and the same factor twice.
-        assert!(restore(&record, None, &[], &paper[..1.min(paper.len())]).unwrap_err().contains("need at least"), "{name}");
+        assert!(
+            restore(&record, None, &[], &paper[..1.min(paper.len())])
+                .unwrap_err()
+                .contains("need at least"),
+            "{name}"
+        );
         if let Some(x) = h.kinds.iter().position(|&k| k != H) {
-            assert!(restore(&record, None, &[(x as u8 + 1, [0; 32])], &[]).unwrap_err().contains("not a hardware share"), "{name}");
+            assert!(
+                restore(&record, None, &[(x as u8 + 1, [0; 32])], &[])
+                    .unwrap_err()
+                    .contains("not a hardware share"),
+                "{name}"
+            );
         }
         if let Some(x) = h.kinds.iter().position(|&k| k != P) {
-            assert!(restore(&record, None, &[], &[(x as u8 + 1, "abandon")]).unwrap_err().contains("not a paper share"), "{name}");
+            assert!(
+                restore(&record, None, &[], &[(x as u8 + 1, "abandon")])
+                    .unwrap_err()
+                    .contains("not a paper share"),
+                "{name}"
+            );
         }
         if let Some(&(x, _)) = hardware.first() {
-            assert!(restore(&record, None, &[(x, [0; 32]), (x, [0; 32])], &[]).unwrap_err().contains("twice"), "{name}");
+            assert!(
+                restore(&record, None, &[(x, [0; 32]), (x, [0; 32])], &[])
+                    .unwrap_err()
+                    .contains("twice"),
+                "{name}"
+            );
         }
         // A bad paper share is refused before any work, and the words typed are not repeated.
         if let Some(&(x, _)) = paper.first() {
             let e = restore(&record, None, &[], &[(x, "hunter2secret abandon")]).unwrap_err();
-            assert!(e.contains("paper share") && !e.contains("hunter2"), "{name}: {e}");
+            assert!(
+                e.contains("paper share") && !e.contains("hunter2"),
+                "{name}: {e}"
+            );
         }
     }
 }
@@ -325,9 +553,15 @@ fn reproduces_every_vector() {
 fn presets_have_the_documented_layout() {
     let salt = [9u8; 16];
     let h = parse_header(&header_2_of_3(1024, 1, &salt)).unwrap();
-    assert_eq!((h.k, h.kinds.as_slice(), h.record_len()), (2, &[S, H, P][..], 152));
+    assert_eq!(
+        (h.k, h.kinds.as_slice(), h.record_len()),
+        (2, &[S, H, P][..], 152)
+    );
     let h = parse_header(&new_header(1024, 1, &salt, 3, &[S, H, H, P, P]).unwrap()).unwrap();
-    assert_eq!((h.k, h.kinds.as_slice(), h.record_len()), (3, &[S, H, H, P, P][..], 186));
+    assert_eq!(
+        (h.k, h.kinds.as_slice(), h.record_len()),
+        (3, &[S, H, H, P, P][..], 186)
+    );
 }
 
 #[test]
@@ -336,31 +570,66 @@ fn header_validation() {
     assert!(new_header(1024, 1, &salt, 1, &[S, H]).is_err(), "k >= 2");
     assert!(new_header(1024, 1, &salt, 3, &[S, H]).is_err(), "k <= n");
     assert!(new_header(1024, 1, &salt, 2, &[P; 6]).is_err(), "n <= 5");
-    assert!(new_header(1024, 1, &salt, 2, &[S, S, P]).is_err(), "one passphrase at most");
-    assert!(new_header(1024, 1, &salt, 5, &[S, H, H, P, P]).is_ok(), "5-of-5");
+    assert!(
+        new_header(1024, 1, &salt, 2, &[S, S, P]).is_err(),
+        "one passphrase at most"
+    );
+    assert!(
+        new_header(1024, 1, &salt, 5, &[S, H, H, P, P]).is_ok(),
+        "5-of-5"
+    );
     // An untrusted record cannot make us allocate by its own number.
     let mut header = header_2_of_3(1024, 1, &salt);
     header[1..5].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(stretch_passphrase("x", &header).unwrap_err().contains("refusing"));
+    assert!(
+        stretch_passphrase("x", &header)
+            .unwrap_err()
+            .contains("refusing")
+    );
 }
 
 #[test]
 fn seal_checks_its_inputs() {
     let header = header_2_of_3(1024, 1, &[0; 16]);
     let pad = [1u8; 32];
-    assert!(seal(&header, &[(1, pad), (2, pad)], &[0; 17], &mut os_random).is_err(), "entropy length");
-    assert!(seal(&header, &[(1, pad)], &[0; 16], &mut os_random).is_err(), "missing pad");
-    assert!(seal(&header, &[(1, pad), (2, pad), (3, pad)], &[0; 16], &mut os_random).is_err(), "pad for paper share");
+    assert!(
+        seal(&header, &[(1, pad), (2, pad)], &[0; 17], &mut os_random).is_err(),
+        "entropy length"
+    );
+    assert!(
+        seal(&header, &[(1, pad)], &[0; 16], &mut os_random).is_err(),
+        "missing pad"
+    );
+    assert!(
+        seal(
+            &header,
+            &[(1, pad), (2, pad), (3, pad)],
+            &[0; 16],
+            &mut os_random
+        )
+        .is_err(),
+        "pad for paper share"
+    );
     // Round trip with real randomness: the self-check a caller does right after sealing.
-    let (record, paper) = seal(&header, &[(1, pad), (2, [2; 32])], &[7; 16], &mut os_random).unwrap();
+    let (record, paper) =
+        seal(&header, &[(1, pad), (2, [2; 32])], &[7; 16], &mut os_random).unwrap();
     assert_eq!(paper.len(), 1);
-    assert_eq!(unseal(&record, &[(1, pad), (2, [2; 32])]).unwrap().0, vec![7; 16]);
-    assert_eq!(unseal(&record, &[(3, paper[0].1), (2, [2; 32])]).unwrap().0, vec![7; 16]);
+    assert_eq!(
+        unseal(&record, &[(1, pad), (2, [2; 32])]).unwrap().0,
+        vec![7; 16]
+    );
+    assert_eq!(
+        unseal(&record, &[(3, paper[0].1), (2, [2; 32])]).unwrap().0,
+        vec![7; 16]
+    );
 }
 
 #[test]
 fn pads_differ_by_share_and_by_header() {
-    let (h1, h2) = (header_2_of_3(1024, 1, &[1; 16]), header_2_of_3(1024, 1, &[2; 16]));
+    let (h1, h2) = (
+        header_2_of_3(1024, 1, &[1; 16]),
+        header_2_of_3(1024, 1, &[2; 16]),
+    );
     let secret = [5u8; 32];
     assert_ne!(pad(&secret, &h1, 1), pad(&secret, &h1, 2));
     assert_ne!(pad(&secret, &h1, 2), pad(&secret, &h2, 2));
@@ -380,7 +649,10 @@ fn malformed_headers_and_records_are_refused() {
     assert!(unseal(&record[1..], &all).is_err());
     for len in [0, 1, 23, 24, 26, 27, 100, 151] {
         assert!(unseal(&record[..len], &all).is_err(), "len {len}");
-        assert!(restore(&record[..len], None, &[], &[]).is_err(), "len {len}");
+        assert!(
+            restore(&record[..len], None, &[], &[]).is_err(),
+            "len {len}"
+        );
     }
 
     let with = |edit: &dyn Fn(&mut Vec<u8>)| {
@@ -396,9 +668,22 @@ fn malformed_headers_and_records_are_refused() {
     assert!(with(&|h| h[22] = 1).is_err(), "k = 1");
     assert!(with(&|h| h[22] = 4).is_err(), "k > n");
     assert!(with(&|h| h[23] = 0).is_err(), "n = 0");
-    assert!(with(&|h| { h[23] = 6; h.extend([2, 3, 3]) }).is_err(), "n = 6");
-    assert!(with(&|h| h[23] = 4).is_err(), "n larger than the kinds present");
-    assert!(with(&|h| h[24..27].copy_from_slice(&[1, 1, 3])).is_err(), "two passphrase shares");
+    assert!(
+        with(&|h| {
+            h[23] = 6;
+            h.extend([2, 3, 3])
+        })
+        .is_err(),
+        "n = 6"
+    );
+    assert!(
+        with(&|h| h[23] = 4).is_err(),
+        "n larger than the kinds present"
+    );
+    assert!(
+        with(&|h| h[24..27].copy_from_slice(&[1, 1, 3])).is_err(),
+        "two passphrase shares"
+    );
     assert!(with(&|h| h.truncate(23)).is_err(), "short buffer");
     assert!(with(&|h| h.truncate(25)).is_err(), "kinds cut short");
     assert!(parse_header(&[]).is_err());
@@ -407,5 +692,9 @@ fn malformed_headers_and_records_are_refused() {
     assert!(unseal(&record, &[(0, [0; 32]), pads[0], pads[1]]).is_err());
     assert!(unseal(&record, &[(4, [0; 32]), pads[0], pads[1]]).is_err());
     assert!(unseal(&record, &[(255, [0; 32]), pads[0], pads[1]]).is_err());
-    assert!(unseal(&record, &[pads[0], pads[0], pads[1]]).unwrap_err().contains("twice"));
+    assert!(
+        unseal(&record, &[pads[0], pads[0], pads[1]])
+            .unwrap_err()
+            .contains("twice")
+    );
 }

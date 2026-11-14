@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Only the workflow actions. Cargo dependencies are pinned exactly and vendored on purpose, so
+  # they are updated by hand (`cargo update`, `cargo vendor`) after reading the changes.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope

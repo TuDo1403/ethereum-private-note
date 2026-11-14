@@ -49,8 +49,14 @@ mod tests {
     #[test]
     fn fingerprint_and_record_id() {
         // A checksum-valid typo ("wave" -> "wage") gives another seed; the fingerprint shows it.
-        let seed = bip39::words_to_entropy("legal winner thank year wave sausage worth useful legal winner thank yellow").unwrap();
-        let typo = bip39::words_to_entropy("legal winner thank year wage sausage worth useful legal winner thank yellow").unwrap();
+        let seed = bip39::words_to_entropy(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        .unwrap();
+        let typo = bip39::words_to_entropy(
+            "legal winner thank year wage sausage worth useful legal winner thank yellow",
+        )
+        .unwrap();
         assert_eq!(seed_fingerprint(&seed), "87dcde7f");
         assert_eq!(seed_fingerprint(&typo), "8b4cedd3");
         assert_eq!(record_id(b""), "e3b0c44298fc1c14"); // SHA-256("") starts e3b0c442 98fc1c14

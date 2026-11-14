@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum
 
+publish = false
+
+[lints]
+workspace = true
+
 # The guided backup and restore wizard. Losing it never blocks a restore, because `recover` and the
 # format in SPEC.md stand alone.
 [dependencies]

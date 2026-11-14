@@ -52,10 +52,20 @@ fn run() -> Result<(), String> {
         Some(Cmd::OpStore { sheet }) => return backup::op_store(&sheet),
         None => {
             clear();
-            choose("What do you want to do?", &["Make a new backup of a seed", "Restore a seed from a backup"])? == 0
+            choose(
+                "What do you want to do?",
+                &[
+                    "Make a new backup of a seed",
+                    "Restore a seed from a backup",
+                ],
+            )? == 0
         }
     };
-    if backup { backup::backup(cli.device) } else { restore::restore_flow(cli.device) }
+    if backup {
+        backup::backup(cli.device)
+    } else {
+        restore::restore_flow(cli.device)
+    }
 }
 
 fn main() {

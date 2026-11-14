@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Every third-party action is pinned to a commit SHA (the comment names the release); Dependabot
+# keeps them current. The Rust toolchain comes from rust-toolchain.toml, which rustup installs on
+# the first cargo call.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # All crates are vendored (.cargo/config.toml), so nothing may touch the network.
+      CARGO_NET_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Native runners for each architecture rather than cross-compiling: the tests run on the real CPU
+  # and OS that ship (Linux and macOS, x86_64 and aarch64). Windows is not supported: `vault` drives
+  # the unix fido2 tools and its tests use a pty.
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_NET_OFFLINE: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm }
+          - { name: macos-x86_64, os: macos-15-intel }
+          - { name: macos-aarch64, os: macos-latest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # `anvil` runs the publish end-to-end tests and `expect` the vault tests. Both skip themselves
+      # when missing, so a skip would pass silently: install them and assert they are there.
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - run: command -v anvil expect
+      - run: cargo test --workspace --locked
+
+  # The vendored sources must be exactly what `cargo vendor` produces from Cargo.lock: nothing
+  # missing (for example a file hidden by .gitignore, which breaks Linux builds) and nothing edited.
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          # Work from a copy without .cargo/config.toml so cargo downloads from crates.io instead of
+          # reading ./vendor. `git archive` also leaves out anything that is not committed.
+          tmp=$(mktemp -d)
+          git archive HEAD | tar -x -C "$tmp"
+          rm -rf "$tmp/.cargo" "$tmp/vendor"
+          (cd "$tmp" && cargo vendor --locked "$tmp/fresh" > /dev/null)
+          diff -r "$tmp/fresh" vendor
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  # The single check to require in branch protection.
+  ci:
+    if: always()
+    needs: [lint, test, vendor, deny]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = false

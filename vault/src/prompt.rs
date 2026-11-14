@@ -25,7 +25,9 @@ pub fn ask(prompt: &str) -> Result<String, String> {
 
 /// Reads from the tty with echo off.
 pub fn ask_hidden(prompt: &str) -> Result<Zeroizing<String>, String> {
-    rpassword::prompt_password(prompt).map(Zeroizing::new).map_err(|e| e.to_string())
+    rpassword::prompt_password(prompt)
+        .map(Zeroizing::new)
+        .map_err(|e| e.to_string())
 }
 
 pub fn pause(msg: &str) -> Result<(), String> {
@@ -67,7 +69,9 @@ pub fn step(n: usize, total: usize, title: &str, secret: bool) {
 /// so the wait is visibly alive and nobody presses Ctrl-C thinking it hung.
 pub fn working<T>(msg: &str, f: impl FnOnce() -> T) -> T {
     let spinner = ProgressBar::new_spinner();
-    spinner.set_style(ProgressStyle::with_template("{spinner} {msg} {elapsed}").expect("valid template"));
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} {msg} {elapsed}").expect("valid template"),
+    );
     spinner.set_message(msg.to_string());
     spinner.enable_steady_tick(Duration::from_millis(120));
     let out = f();
@@ -89,19 +93,27 @@ pub fn show_words(title: &str, words: &str) {
 pub fn enter_paper_share(x: u8) -> Result<Zeroizing<String>, String> {
     let word = |n: usize, hint: &str| -> Result<&'static str, String> {
         loop {
-            if let Some(w) = complete_word(&ask_hidden(&format!("paper share {x}, word {n}/24{hint}: "))?) {
+            if let Some(w) = complete_word(&ask_hidden(&format!(
+                "paper share {x}, word {n}/24{hint}: "
+            ))?) {
                 return Ok(w);
             }
             println!("  not a BIP39 word, or too short to be unique: type it again");
         }
     };
-    let mut words = (1..=24).map(|n| word(n, " (first letters are enough)")).collect::<Result<Vec<_>, _>>()?;
+    let mut words = (1..=24)
+        .map(|n| word(n, " (first letters are enough)"))
+        .collect::<Result<Vec<_>, _>>()?;
     loop {
         let joined = Zeroizing::new(words.join(" "));
-        let Err(e) = share_from_words(&joined) else { return Ok(joined) };
+        let Err(e) = share_from_words(&joined) else {
+            return Ok(joined);
+        };
         // The checksum says some word is wrong but not which one, so the user picks.
         println!("\n{e}");
-        let n: usize = ask("Which word number (1-24) do you want to type again? ")?.parse().unwrap_or(0);
+        let n: usize = ask("Which word number (1-24) do you want to type again? ")?
+            .parse()
+            .unwrap_or(0);
         if (1..=24).contains(&n) {
             words[n - 1] = word(n, "")?;
         }

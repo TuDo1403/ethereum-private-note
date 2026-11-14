@@ -29,7 +29,9 @@ impl From<String> for Fail {
 
 /// Removes `name value` from `args` and returns the value.
 fn flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>, Fail> {
-    let Some(i) = args.iter().position(|a| a == name) else { return Ok(None) };
+    let Some(i) = args.iter().position(|a| a == name) else {
+        return Ok(None);
+    };
     if i + 1 >= args.len() {
         return Err(Fail::Usage(format!("{name} needs a value")));
     }
@@ -48,23 +50,41 @@ struct Factors<'a> {
 }
 
 fn parse_factors(input: &str) -> Result<Factors<'_>, Fail> {
-    let bad = |n: usize, what: &str| Fail::Usage(format!("stdin line {n}: invalid {what}; expected `pass <passphrase>`, `paper <X> <24 words>` or `hw <X> <64 hex>`"));
+    let bad = |n: usize, what: &str| {
+        Fail::Usage(format!(
+            "stdin line {n}: invalid {what}; expected `pass <passphrase>`, `paper <X> <24 words>` or `hw <X> <64 hex>`"
+        ))
+    };
     let mut f = Factors::default();
-    for (i, line) in input.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+    for (i, line) in input
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+    {
         let n = i + 1;
         let (tag, rest) = line.split_once(' ').ok_or(bad(n, "line"))?;
         match tag {
             "pass" if f.pass.is_none() => f.pass = Some(rest), // not trimmed: spaces are part of a passphrase
             "pass" => return Err(bad(n, "second passphrase")),
             "paper" | "hw" => {
-                let what = if tag == "paper" { "paper share" } else { "hardware secret" };
+                let what = if tag == "paper" {
+                    "paper share"
+                } else {
+                    "hardware secret"
+                };
                 let (x, value) = rest.split_once(' ').ok_or(bad(n, what))?;
                 let x: u8 = x.parse().map_err(|_| bad(n, what))?;
                 if tag == "paper" {
                     share_from_words(value).map_err(|_| bad(n, what))?; // 24 words, checksum right
                     f.paper.push((x, value));
                 } else {
-                    f.hardware.push((x, unhex(value).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).ok_or(bad(n, what))?));
+                    f.hardware.push((
+                        x,
+                        unhex(value)
+                            .ok()
+                            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                            .ok_or(bad(n, what))?,
+                    ));
                 }
             }
             _ => return Err(bad(n, "line")),
@@ -80,24 +100,39 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
     let device = flag(&mut args, "--device")?;
     let mut keys = Vec::new();
     while let Some(k) = flag(&mut args, "--key")? {
-        let (x, cred) = k.split_once('=').ok_or(Fail::Usage("--key needs X=CRED_ID".into()))?;
-        let x: u8 = x.parse().map_err(|_| Fail::Usage("--key needs X=CRED_ID with X a number".into()))?;
+        let (x, cred) = k
+            .split_once('=')
+            .ok_or(Fail::Usage("--key needs X=CRED_ID".into()))?;
+        let x: u8 = x
+            .parse()
+            .map_err(|_| Fail::Usage("--key needs X=CRED_ID with X a number".into()))?;
         keys.push((x, cred.to_string()));
     }
     let [record_hex] = args.as_slice() else {
-        return Err(Fail::Usage("restore takes exactly one argument: the record hex (secrets must come from stdin)".into()));
+        return Err(Fail::Usage(
+            "restore takes exactly one argument: the record hex (secrets must come from stdin)"
+                .into(),
+        ));
     };
     let record = unhex(record_hex)?;
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).map_err(|_| Fail::Error("stdin is not UTF-8".into()))?;
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|_| Fail::Error("stdin is not UTF-8".into()))?;
     let mut f = parse_factors(&input)?;
 
     // Validate every factor before the slow and interactive steps: the YubiKey PIN and touch, then Argon2.
-    let xs: Vec<u8> = f.hardware.iter().map(|h| h.0).chain(keys.iter().map(|k| k.0)).collect();
+    let xs: Vec<u8> = f
+        .hardware
+        .iter()
+        .map(|h| h.0)
+        .chain(keys.iter().map(|k| k.0))
+        .collect();
     record::check_factors(&record, f.pass.is_some(), &xs, &f.paper)?;
     for (x, cred) in keys {
         eprintln!("Enter the PIN and touch the YubiKey that is share {x}.");
-        f.hardware.push((x, fido::secret(&cred, device.as_deref())?));
+        f.hardware
+            .push((x, fido::secret(&cred, device.as_deref())?));
     }
     if f.pass.is_some() {
         eprintln!("Stretching passphrase (Argon2id; takes a while)...");
@@ -110,7 +145,11 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = if args.is_empty() { String::new() } else { args.remove(0) };
+    let cmd = if args.is_empty() {
+        String::new()
+    } else {
+        args.remove(0)
+    };
     let result = match cmd.as_str() {
         "restore" => cmd_restore(args),
         _ => Err(Fail::Usage("expected the subcommand: restore".into())),

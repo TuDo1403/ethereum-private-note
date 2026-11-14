@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 
+publish = false
+
+[lints]
+workspace = true
+
 # ONLINE half of the backup: publishes the public record.hex on chain. Handles no secret except a
 # throwaway gas key that lives in memory only. It shares the format crate for the record check (so it
 # can never publish a record that `recover` would refuse) and the record id.
