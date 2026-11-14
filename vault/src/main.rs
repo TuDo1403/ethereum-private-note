@@ -18,6 +18,7 @@ mod setup;
 mod sheet;
 
 use clap::{Parser, Subcommand};
+use epn_core::host;
 use prompt::{choose, clear};
 use std::io::IsTerminal;
 
@@ -31,6 +32,9 @@ struct Cli {
     /// FIDO2 device path, when several keys are plugged in (see `fido2-token -L`)
     #[arg(long, global = true, value_name = "PATH")]
     device: Option<String>,
+    /// Continue even though this host is online or has a monitoring agent (keyloggers see everything)
+    #[arg(long, global = true)]
+    allow_unsafe_host: bool,
 }
 
 #[derive(Subcommand)]
@@ -56,6 +60,9 @@ fn run() -> Result<(), String> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err("vault is interactive: run it in a terminal, not through a pipe".into());
     }
+    for w in host::harden() {
+        eprintln!("warning: {w}");
+    }
     let command = match cli.command {
         Some(c) => c,
         None => {
@@ -74,6 +81,11 @@ fn run() -> Result<(), String> {
             }
         }
     };
+    // `plan` handles no secret and `op-store` types only one 1Password share on a machine that never holds
+    // another factor: both are meant to run online. Everything else types factors, so a keylogger would see them.
+    if !matches!(command, Cmd::Plan | Cmd::OpStore { .. }) {
+        host::require_trusted_host(cli.allow_unsafe_host)?;
+    }
     match command {
         Cmd::Backup { setup } => backup::backup(setup, cli.device),
         Cmd::Plan => setup::plan(),

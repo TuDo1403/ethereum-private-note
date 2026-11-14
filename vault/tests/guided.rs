@@ -14,7 +14,15 @@ set timeout 300
 proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # rpassword prints its prompt before it turns echo off; a person types later than that, a script must
 # wait, or the pty echoes the "hidden" seed into the transcript that the test checks for leaks.
-proc secret {s} { sleep 0.3; send "$s\r" }
+# A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
+# echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
+proc secret {s} {
+    for {set i 0} {$i < 200} {incr i} {
+        if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
+        sleep 0.05
+    }
+    send "$s\r"
+}
 # Menus and y/n questions (dialoguer) read keys in raw mode once drawn: wait for the prompt, pause like a
 # person, then press keys. `pick n` moves down n items and presses Enter.
 proc pick {prompt n} { expect -ex $prompt; sleep 0.3; send [string repeat "\033\[B" $n]; send "\r" }
@@ -37,7 +45,7 @@ proc plug {key} { set f [open "$::env(WORK)/key" w]; puts $f $key; close $f }
 "#;
 
 const SCRIPT: &str = r#"
-spawn $env(VAULT) backup --device /dev/fake
+spawn $env(VAULT) --allow-unsafe-host backup --device /dev/fake
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "How should this backup be split?" 0
 answer "Rename any of them?" n
@@ -80,7 +88,7 @@ expect "publish <rpc-url>"
 expect eof
 
 # Verify only: the papers open the record, the fingerprint is shown, the seed is not.
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -100,7 +108,7 @@ puts "\nDIR=$dir FP=$fp"
 /// then `vault op-store` (twice: the second run must find the item, not duplicate it), then a verify-only
 /// restore from the 1Password share and the paper share (no passphrase, so no Argon2 in the restore).
 const SCRIPT_1PASSWORD: &str = r#"
-spawn $env(VAULT) backup
+spawn $env(VAULT) --allow-unsafe-host backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "How should this backup be split?" 1
 answer "Rename any of them?" n
@@ -152,7 +160,7 @@ type_words $shareb
 expect "already in 1Password"
 expect eof
 
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -168,7 +176,7 @@ expect eof
 
 # A failing `op read` (locked, Touch ID cancelled) must not end the restore: it falls back to the paper.
 set env(FAKE_OP_READ_FAILS) 1
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -502,7 +510,7 @@ printf '%s\n' "$h" "$rp" AQID AQID "$s""#;
 const SCRIPT_TWO_KEYS: &str = r#"
 # A setup file is untrusted input: a bad one is refused before any folder is made.
 set f [open "$env(WORK)/bad.txt" w]; puts $f "epn setup v2"; close $f
-spawn $env(VAULT) backup bad.txt
+spawn $env(VAULT) --allow-unsafe-host backup bad.txt
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect "the first line must be"
 expect eof
@@ -510,7 +518,7 @@ if {[llength [glob -nocomplain backup-*]] > 0} { fail "a folder was made for a r
 
 set f [open "$env(WORK)/setup.txt" w]; puts -nonewline $f $env(PLAN); close $f
 # --device names one key: refused for two YubiKeys, before any folder is made.
-spawn $env(VAULT) backup --device /dev/fake setup.txt
+spawn $env(VAULT) --allow-unsafe-host backup --device /dev/fake setup.txt
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 # From a file the setup cannot be changed here, and only Enter accepts it: "no" asks again.
 expect "or type back to stop (change it with `vault plan`): "; send "no\r"
@@ -521,7 +529,7 @@ expect eof
 if {[llength [glob -nocomplain backup-*]] > 0} { fail "a folder was made for a refused --device" }
 
 plug A
-spawn $env(VAULT) backup setup.txt
+spawn $env(VAULT) --allow-unsafe-host backup setup.txt
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect "places were checked in vault plan"
 expect "All 6 combinations that open it"
@@ -568,7 +576,7 @@ expect "7/7 Backup made"
 expect eof
 
 # Verify only with the two keys, one at a time: no passphrase, no paper.
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -654,7 +662,7 @@ fn backup_two_keys_from_plan() {
 /// scored weak (one account breach opens it) and taken with `yes`; `vault op-store` asks which share to
 /// store and stores only that one, under its own share number.
 const SCRIPT_OP_PICK: &str = r#"
-spawn $env(VAULT) backup
+spawn $env(VAULT) --allow-unsafe-host backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "How should this backup be split?" 4
 pick "Add share 1" 3
@@ -806,7 +814,7 @@ fn restore_two_keys_from_new_sheet() {
     );
     let script = format!(
         r#"
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 {V1_START}
 answer "share 1: passphrase" n
 answer "share 2: YubiKey A (YubiKey and its PIN)" y
@@ -835,7 +843,7 @@ fn restore_from_old_sheet_finds_credential() {
     );
     let script = format!(
         r#"
-spawn $env(VAULT) restore --device /dev/fake
+spawn $env(VAULT) --allow-unsafe-host restore --device /dev/fake
 {V1_START}
 answer "share 1: passphrase" n
 answer "share 2: YubiKey and its PIN" y

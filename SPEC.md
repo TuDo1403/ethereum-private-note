@@ -154,7 +154,7 @@ is refused.
 The normal way is `vault restore`: it reads every secret at a hidden prompt on the terminal. `recover` is
 the small scriptable tool:
 
-    recover restore <record-hex> [--key X=CRED_ID[@PATH]]... [--device PATH]   < factors
+    recover restore <record-hex> [--key X=CRED_ID[@PATH]]... [--device PATH] [--allow-unsafe-host]   < factors
 
 `--key X=CRED_ID` (repeatable) asks the YubiKey that is share X for its secret through libfido2 (PIN and
 touch); `--device` picks the device when several are plugged in. With two or more YubiKeys plugged in at
