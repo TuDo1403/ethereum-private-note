@@ -14,7 +14,15 @@ set timeout 300
 proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # rpassword prints its prompt before it turns echo off; a person types later than that, a script must
 # wait, or the pty echoes the "hidden" seed into the transcript that the test checks for leaks.
-proc secret {s} { sleep 0.3; send "$s\r" }
+# A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
+# echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
+proc secret {s} {
+    for {set i 0} {$i < 200} {incr i} {
+        if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
+        sleep 0.05
+    }
+    send "$s\r"
+}
 # Menus and y/n questions (dialoguer) read keys in raw mode once drawn: wait for the prompt, pause like a
 # person, then press keys. `pick n` moves down n items and presses Enter.
 proc pick {prompt n} { expect -ex $prompt; sleep 0.3; send [string repeat "\033\[B" $n]; send "\r" }
