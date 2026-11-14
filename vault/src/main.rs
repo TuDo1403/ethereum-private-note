@@ -12,37 +12,44 @@ mod onepassword;
 mod prompt;
 mod restore;
 
-use prompt::{choose_1_or_2, clear};
+use clap::{Parser, Subcommand};
+use prompt::{choose, clear};
 use std::io::IsTerminal;
 
+/// Guided, offline seed backup and restore (Ethereum Private Note). Without a command, shows a menu.
+/// Secrets are only ever typed at hidden prompts, never given as arguments.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+    /// FIDO2 device path, when several keys are plugged in (see `fido2-token -L`)
+    #[arg(long, global = true, value_name = "PATH")]
+    device: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Make a new backup of a seed (run it offline)
+    Backup,
+    /// Restore a seed, or verify a backup without ever showing the seed
+    Restore,
+}
+
 fn run() -> Result<(), String> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let device = match args.iter().position(|a| a == "--device") {
-        Some(i) if i + 1 < args.len() => {
-            args.remove(i);
-            Some(args.remove(i))
-        }
-        Some(_) => return Err("--device needs a value".into()),
-        None => None,
-    };
-    let backup = match args.as_slice() {
-        [] => None,
-        [m] if m == "backup" => Some(true),
-        [m] if m == "restore" => Some(false),
-        _ => return Err("usage: vault [backup|restore] [--device PATH]".into()),
-    };
+    let cli = Cli::parse();
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err("vault is interactive: run it in a terminal, not through a pipe".into());
     }
-    let backup = match backup {
-        Some(b) => b,
+    let backup = match cli.command {
+        Some(Cmd::Backup) => true,
+        Some(Cmd::Restore) => false,
         None => {
             clear();
-            println!("What do you want to do?\n  1. make a new backup of a seed\n  2. restore a seed from a backup\n");
-            choose_1_or_2()? == 1
+            choose("What do you want to do?", &["Make a new backup of a seed", "Restore a seed from a backup"])? == 0
         }
     };
-    if backup { backup::backup(device) } else { restore::restore_flow(device) }
+    if backup { backup::backup(cli.device) } else { restore::restore_flow(cli.device) }
 }
 
 fn main() {

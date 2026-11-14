@@ -1,8 +1,12 @@
 //! Terminal prompts shared by backup and restore. Every secret is read with echo off and held in
 //! `Zeroizing`; the screen (and its scrollback) is cleared after a secret was shown.
 
+use console::style;
+use dialoguer::{Confirm, Select, theme::ColorfulTheme};
 use epn_core::bip39::{complete_word, share_from_words};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Attempts a person gets at a typed secret before the step gives up.
@@ -34,25 +38,43 @@ pub fn clear() {
     std::io::stdout().flush().ok();
 }
 
+/// y or n, then Enter: a single stray key must not answer a question about secrets.
 pub fn yes(prompt: &str) -> Result<bool, String> {
-    loop {
-        match ask(&format!("{prompt} [y/n]: "))?.to_lowercase().as_str() {
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            _ => println!("Please answer y or n."),
-        }
-    }
+    Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .wait_for_newline(true)
+        .interact()
+        .map_err(|e| e.to_string())
 }
 
-/// Asks for 1 or 2.
-pub fn choose_1_or_2() -> Result<u8, String> {
-    loop {
-        match ask("1 or 2: ")?.as_str() {
-            "1" => return Ok(1),
-            "2" => return Ok(2),
-            _ => {}
-        }
-    }
+/// An arrow-key menu (Enter picks); returns the index of the item chosen.
+pub fn choose(prompt: &str, items: &[&str]) -> Result<usize, String> {
+    Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .items(items)
+        .default(0)
+        .interact()
+        .map_err(|e| e.to_string())
+}
+
+/// A step header. Steps that take or show a secret are red, so nobody misses that the screen matters now.
+pub fn step(n: usize, total: usize, title: &str, secret: bool) {
+    let text = style(format!("{n}/{total} {title}")).bold();
+    println!("{}", if secret { text.red() } else { text.cyan() });
+}
+
+/// Runs slow work (Argon2id: seconds, with 1 GiB of memory) under a spinner showing the elapsed time,
+/// so the wait is visibly alive and nobody presses Ctrl-C thinking it hung.
+pub fn working<T>(msg: &str, f: impl FnOnce() -> T) -> T {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(ProgressStyle::with_template("{spinner} {msg} {elapsed}").expect("valid template"));
+    spinner.set_message(msg.to_string());
+    spinner.enable_steady_tick(Duration::from_millis(120));
+    let out = f();
+    let took = spinner.elapsed().as_secs();
+    spinner.finish_and_clear();
+    println!("{msg}: done in {took} s.");
+    out
 }
 
 pub fn show_words(title: &str, words: &str) {

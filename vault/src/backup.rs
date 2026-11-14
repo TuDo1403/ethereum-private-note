@@ -170,8 +170,7 @@ type Shares = Zeroizing<Vec<(u8, [u8; 32])>>;
 /// (x, share). Copies of the pads made along the way are wiped on a best-effort basis only (see main.rs).
 fn build_record(entropy: &[u8], pass: &str, kinds: &[Kind], prf: Option<&[u8; 32]>) -> Result<(Vec<u8>, Shares), String> {
     let header = new_header(ARGON_M_KIB, ARGON_T, &os_random(16), 2, kinds)?;
-    println!("Stretching the passphrase (Argon2id, 1 GiB; takes a while)...");
-    let argon = Zeroizing::new(stretch_passphrase(pass, &header)?);
+    let argon = Zeroizing::new(working("Stretching the passphrase (Argon2id, 1 GiB)", || stretch_passphrase(pass, &header))?);
     let mut pads: Shares = Zeroizing::new(Vec::with_capacity(2)); // never reallocates: no unwiped copy
     pads.push((PASS_X, pad(&*argon, &header, PASS_X)));
     if let Some(prf) = prf {
@@ -208,11 +207,13 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     println!("The public files will be saved in ./{dir}/ (checked writable).");
     pause("Press Enter when you are offline and ready.")?;
 
-    println!("\n1/6 Second factor (share {KEY_X})");
-    println!("  1. YubiKey: a hardware key, unlocked with its PIN and a touch");
-    println!("  2. 1Password: a share kept as a 1Password item, unlocked with Touch ID");
-    println!("     (needs the 1Password app with \"Integrate with 1Password CLI\" on, and the `op` command)");
-    let second = if choose_1_or_2()? == 1 {
+    println!();
+    step(1, 6, &format!("Second factor (share {KEY_X})"), false);
+    let options = [
+        "YubiKey: a hardware key, unlocked with its PIN and a touch",
+        "1Password: a 1Password item, unlocked with Touch ID (needs the app's CLI integration and `op`)",
+    ];
+    let second = if choose("Which second factor?", &options)? == 0 {
         let id = ask("Paste the credential id if this key already has one from `vault`, or press Enter to make a new one: ")?;
         Second::YubiKey(if id.is_empty() {
             println!("Making a credential: enter the YubiKey PIN, then touch the key when it blinks.");
@@ -235,13 +236,15 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
         Second::OnePassword { account, vault }
     };
 
-    println!("\n2/6 Seed");
+    println!();
+    step(2, 6, "Seed (typed hidden, twice)", true);
     let entropy = enter_seed()?;
 
     // Generated, shown once, then proven.
     let pass = Zeroizing::new(new_passphrase(7));
     clear();
-    println!("3/6 Passphrase (7 generated words). Write it on paper now, in lowercase, one space between words.");
+    step(3, 6, "Passphrase (7 generated words)", true);
+    println!("Write it on paper now, in lowercase, one space between words.");
     println!("Keep it apart from the paper share and from the second factor. It is NOT a wallet seed.\n");
     show_words("passphrase:", &pass);
     println!();
@@ -249,7 +252,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     confirm_passphrase(&pass)?;
 
     clear();
-    println!("4/6 Building the backup.");
+    step(4, 6, "Building, checking and saving the backup", false);
     let prf = match &second {
         Second::YubiKey(cred) => {
             println!("Enter the YubiKey PIN, then touch the key when it blinks.");
@@ -287,7 +290,9 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     }
 
     let share_words = paper_words(&paper, PAPER_X);
-    println!("\n5/6 Paper share (24 words). Write it on paper, in a different place from the passphrase.");
+    println!();
+    step(5, 6, "Paper share (24 words)", true);
+    println!("Write it on paper, in a different place from the passphrase.");
     println!("These 24 words look like a wallet seed but are NOT one. Label the paper \"backup share {PAPER_X}, not a wallet\".\n");
     show_words(&format!("paper share (this is share {PAPER_X}):"), &share_words);
     println!();
@@ -297,9 +302,10 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     })?;
     clear();
 
-    println!("6/6 Backup made. Seed fingerprint: {fingerprint}   record id: {}\n", record_id(&record));
+    step(6, 6, &format!("Backup made. Seed fingerprint: {fingerprint}   record id: {}", record_id(&record)), false);
+    println!();
     println!("Next:");
-    println!("  1. TEST your papers now, offline: run `vault restore`, choose 2 (verify only) and try each pair of");
+    println!("  1. TEST your papers now, offline: run `vault restore`, pick \"Verify only\" and try each pair of");
     println!("     factors in turn. Each must show fingerprint {fingerprint}. The seed is never shown.");
     println!("  2. on an online machine, store the record on a chain (no secrets needed):");
     println!("       publish <rpc-url> {dir}/record.hex <refund-address>");
