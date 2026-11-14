@@ -512,6 +512,9 @@ set f [open "$env(WORK)/setup.txt" w]; puts -nonewline $f $env(PLAN); close $f
 # --device names one key: refused for two YubiKeys, before any folder is made.
 spawn $env(VAULT) backup --device /dev/fake setup.txt
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+# From a file the setup cannot be changed here, and only Enter accepts it: "no" asks again.
+expect "or type back to stop (change it with `vault plan`): "; send "no\r"
+expect "Press Enter, or type back."
 expect "Press Enter to use this setup"; send "\r"
 expect "this setup has 2 YubiKeys: run it without --device"
 expect eof

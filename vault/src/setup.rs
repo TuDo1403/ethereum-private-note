@@ -253,18 +253,30 @@ fn mark(v: Verdict) -> &'static str {
     }
 }
 
+/// Whether `label` holds the words of `place` in a row, as whole words and case aside: place "home" is in
+/// "home key" but not in "homeless", place "a" not in "paper" (it is in "paper A").
+fn names_place(label: &str, place: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let (label, place) = (words(label), words(place));
+    !place.is_empty() && label.windows(place.len()).any(|w| w == place.as_slice())
+}
+
 /// The review screen: summary, Loss/Theft lines, warnings, every combination; Ok(true) = accepted.
 /// Without places (a backup from setup.txt) only the rules that need none apply.
 pub fn review(layout: &Layout, places: Option<&[String]>) -> Result<bool, String> {
     let s = score(layout, places);
     let mut warnings = s.warnings.clone();
-    // Labels are public: a place in one would put it on the sheet. Matched loosely, case aside.
+    // Labels are public: a place in one would put it on the sheet.
     for sh in &layout.shares {
-        let label = sh.label.to_lowercase();
         if let Some(p) = places
             .into_iter()
             .flatten()
-            .find(|p| label.contains(&p.to_lowercase()))
+            .find(|p| names_place(&sh.label, p))
         {
             warnings.push(format!(
                 "the label \"{}\" names the place {p}, and labels go on the public recovery sheet → rename it",
@@ -311,13 +323,28 @@ pub fn review(layout: &Layout, places: Option<&[String]>) -> Result<bool, String
         println!("  {}", line.trim_end());
     }
 
+    // Without places the setup came from setup.txt and cannot be changed here: declining stops the backup.
+    let from_file = places.is_none();
     if weak {
-        Ok(
-            ask("\nThis setup is weak. To use it anyway, type yes; press Enter to change it: ")?
-                == "yes",
-        )
+        let prompt = if from_file {
+            "\nThis setup is weak. To use it anyway, type yes; press Enter to stop (change it with `vault plan`): "
+        } else {
+            "\nThis setup is weak. To use it anyway, type yes; press Enter to change it: "
+        };
+        return Ok(ask(prompt)? == "yes");
+    }
+    let prompt = if from_file {
+        "\nPress Enter to use this setup, or type back to stop (change it with `vault plan`): "
     } else {
-        Ok(ask("\nPress Enter to use this setup, or type back to change it: ")? != "back")
+        "\nPress Enter to use this setup, or type back to change it: "
+    };
+    // Only Enter accepts: a typed "no" must not take the setup.
+    loop {
+        match ask(prompt)?.as_str() {
+            "" => return Ok(true),
+            "back" => return Ok(false),
+            _ => println!("Press Enter, or type back."),
+        }
     }
 }
 
@@ -375,5 +402,21 @@ fn save_plan(text: &str) -> Result<String, String> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
             Err(e) => return Err(format!("cannot write {path}: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_place;
+
+    #[test]
+    fn a_place_is_found_in_a_label_by_whole_words() {
+        assert!(names_place("Home key", "home"));
+        assert!(names_place("key in the home safe", "Home Safe"));
+        assert!(names_place("paper A", "a"));
+        assert!(!names_place("paper", "a"));
+        assert!(!names_place("homeless key", "home"));
+        assert!(!names_place("home key", "home safe"));
+        assert!(!names_place("paper", "--"));
     }
 }
