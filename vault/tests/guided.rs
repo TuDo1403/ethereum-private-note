@@ -27,6 +27,11 @@ proc words_of {block} {
     foreach {all w} [regexp -all -inline {[0-9]+\. ([a-z]+)} $block] { lappend out $w }
     return $out
 }
+# The places screen: for each label, an existing place (its index in the list so far) or a new one.
+proc place {label index {new ""}} {
+    pick "Where will $label be kept?" $index
+    if {$new ne ""} { expect "New place"; send "$new\r" }
+}
 "#;
 
 const SCRIPT: &str = r#"
@@ -385,6 +390,46 @@ fn backup_with_1password_then_verify_only_restore() {
             && !sheet.contains("--key"),
         "{sheet}"
     );
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
+const PLACES: [&str; 3] = ["home", "office", "parents"];
+
+/// Preset 3 (2 of 4) as `vault plan` saves it: no places.
+const PLAN3: &str = "epn setup v1\nk 2\nshare 1 passphrase \"passphrase\"\nshare 2 yubikey \"YubiKey A\"\nshare 3 yubikey \"YubiKey B\"\nshare 4 paper \"paper\"\n";
+
+const SCRIPT_PLAN: &str = r#"
+spawn $env(VAULT) plan
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "How should this backup be split?" 2
+answer "Rename any of them?" n
+place passphrase 0 home
+place "YubiKey A" 0
+place "YubiKey B" 1 office
+place paper 2 parents
+expect "Loss    ✓ strong"
+expect "one break-in at home opens it: passphrase + YubiKey A"
+expect "All 6 combinations that open it"
+expect "type yes"; send "yes\r"
+expect -re {Saved (\S+)}
+expect "Where things are"
+expect -re {YubiKey B +office}
+expect "clear the screen"; send "\r"
+expect eof
+"#;
+
+#[test]
+fn plan_scores_and_saves_without_places() {
+    let Some((work, transcript)) = run_script("plan", SCRIPT_PLAN, &[], &[]) else {
+        return;
+    };
+    let saved = std::fs::read_to_string(work.join("setup.txt")).unwrap();
+    assert_eq!(saved, PLAN3);
+    for place in PLACES {
+        assert!(!saved.contains(place), "setup.txt names {place}");
+    }
+    // The private list is on screen, label by label.
+    assert!(transcript.contains("passphrase  home"), "{transcript}");
     std::fs::remove_dir_all(&work).unwrap();
 }
 

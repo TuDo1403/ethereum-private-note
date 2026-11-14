@@ -7,7 +7,7 @@
 //! `parse` also reads sheets made before setups were flexible: one `credential:` line (the YubiKey, share
 //! 2) and `1password:` lines, so every backup made so far still restores through `vault restore`.
 
-use crate::layout::{Layout, ShareKind};
+use crate::layout::{Layout, ShareKind, hides_text};
 use crate::onepassword::{check_account, reference, sheet_references, split_reference, title};
 use epn_core::{hex, record_id};
 
@@ -76,8 +76,9 @@ pub fn render(
             }
             ShareKind::OnePassword { account, vault } => {
                 let r = reference(vault, &title(x as u8, &id));
+                // Quoted: vault names may hold spaces, and the command is meant to be copied as is.
                 stdin.push(format!(
-                    "paper {x} <words from `op read --account {account} {r}`>"
+                    "paper {x} <words from `op read --account {account} '{r}'`>"
                 ));
                 ("1password", format!("{r} account {account}"))
             }
@@ -152,21 +153,14 @@ pub fn parse(sheet: &str) -> Vec<SheetShare> {
     cred.into_iter().chain(op).collect()
 }
 
-/// The common Unicode format characters (category Cf) that hide or reorder text: zero width and direction
-/// marks, bidi embeddings and isolates, the byte order mark. Not every Cf code point; std has no category test.
-fn is_format(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
-}
-
 /// `share <x>:  <kind>  "<label>"  <locator>`. The label sits between the first pair of quotes (labels
 /// hold none), and the locator follows it.
 fn parse_line(l: &str) -> Option<SheetShare> {
     let (x, rest) = l.strip_prefix("share ")?.split_once(':')?;
     let (kind, rest) = rest.trim_start().split_once(' ')?;
     let (label, tail) = rest.trim_start().strip_prefix('"')?.split_once('"')?;
-    // The label is printed in restore prompts: a control character (ESC, CR) could rewrite the screen around
-    // them, and a format character (bidi override, zero width) could disguise what is shown.
-    if label.chars().any(|c| c.is_control() || is_format(c)) {
+    // The label is printed in restore prompts, where such a character could rewrite or disguise the screen.
+    if label.chars().any(hides_text) {
         return None;
     }
     let tail = tail.trim();
@@ -246,7 +240,7 @@ mod tests {
             "--key 2=Zm9v@<path>",
             "--key 3=YmFy@<path>",
             "Any 2 of: passphrase, YubiKey A",
-            "pass <passphrase>   paper 4 <24 words>   paper 5 <words from `op read --account my.1password.com op://Private Vault/epn-share-5-",
+            "pass <passphrase>   paper 4 <24 words>   paper 5 <words from `op read --account my.1password.com 'op://Private Vault/epn-share-5-",
         ] {
             assert!(text.contains(want), "{want:?}\n{text}");
         }

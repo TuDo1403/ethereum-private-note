@@ -51,7 +51,11 @@ pub fn score(layout: &Layout, places: Option<&[String]>) -> Score {
     let (n, k) = (layout.n(), layout.k);
     let label = |i: usize| layout.shares[i].label.as_str();
     let combos = combinations(n, k);
-    // A list of the wrong length cannot be matched to shares; treat it as unknown rather than index out of range.
+    // A list of the wrong length cannot be matched to shares: a caller bug, caught in tests; in a release
+    // build it counts as unknown rather than index out of range.
+    if let Some(p) = places {
+        debug_assert_eq!(p.len(), n, "one place per share");
+    }
     let places = places.filter(|p| p.len() == n);
     let mut warnings = Vec::new();
 

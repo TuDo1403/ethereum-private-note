@@ -9,7 +9,7 @@ use crate::onepassword::{check_account, check_name};
 use epn_core::record::Kind;
 
 /// The format allows at most 5 shares (SPEC.md); k is at least 2 so no single share restores the seed.
-const MAX_SHARES: usize = 5;
+pub const MAX_SHARES: usize = 5;
 const MAX_LABEL: usize = 40;
 const PLAN_HEADER: &str = "epn setup v1";
 
@@ -49,15 +49,26 @@ pub struct Layout {
     pub shares: Vec<ShareSpec>,
 }
 
-/// Labels go on the public recovery sheet and inside the plan file's double quotes, so no quotes and no
-/// control characters (which include newlines).
+/// Characters a label must not hold because, printed in a prompt, they could rewrite or disguise the
+/// screen: control characters (ESC, CR, newline) and the common Unicode format characters (category Cf)
+/// that hide or reorder text (zero width and direction marks, bidi embeddings and isolates, the byte order
+/// mark; not every Cf code point, std has no category test). `sheet::parse` skips a share line whose label
+/// holds one, so `check_label` refuses the same set: a label accepted while planning must not give a sheet
+/// line that restore then ignores.
+pub fn hides_text(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// Labels go on the public recovery sheet and inside the plan file's double quotes, so no quotes and
+/// nothing `hides_text` names.
 pub fn check_label(s: &str) -> Result<(), String> {
     let n = s.chars().count();
-    if (1..=MAX_LABEL).contains(&n) && !s.chars().any(|c| c == '"' || c.is_control()) {
+    if (1..=MAX_LABEL).contains(&n) && !s.chars().any(|c| c == '"' || hides_text(c)) {
         Ok(())
     } else {
         Err(format!(
-            "a label must be 1 to {MAX_LABEL} characters, with no quotes or control characters"
+            "a label must be 1 to {MAX_LABEL} characters, with no quotes, control or invisible formatting characters"
         ))
     }
 }
@@ -403,5 +414,9 @@ mod tests {
                 && check_label("").is_err()
         );
         assert!(check_label(&"x".repeat(41)).is_err() && check_label(&"x".repeat(40)).is_ok());
+        // exactly what sheet::parse skips: ESC, CR, a bidi override, a zero width space
+        for bad in ["a\x1bb", "a\rb", "a\u{202E}b", "a\u{200B}b", "a\u{FEFF}b"] {
+            assert!(check_label(bad).is_err(), "{bad:?}");
+        }
     }
 }
