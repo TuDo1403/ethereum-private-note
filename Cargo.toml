@@ -2,6 +2,11 @@
 members = ["core", "recover", "vault", "publish"]
 resolver = "3"
 
+# One version for every crate: the four binaries ship together in one tarball under one `vX.Y.Z`
+# tag. Bump it here, in the release PR, before tagging (see "Releasing" in README.md).
+[workspace.package]
+version = "0.1.0"
+
 # Every dependency is pinned exactly and vendored in ./vendor (see .cargo/config.toml), so this builds
 # offline years from now. `recover` must stay tiny: it is the tool you need in an emergency.
 
