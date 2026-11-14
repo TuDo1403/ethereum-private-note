@@ -1,49 +1,27 @@
 //! `vault backup`: the offline half, step by step. It leaves two public files (the record and a recovery
 //! sheet); sending the record to a chain is a separate, online step that never needs a secret.
 //!
-//! The backup is the 2-of-3 layout: passphrase (x = 1), second factor (x = 2), paper share (x = 3). The
-//! second factor is a YubiKey (a hardware share, masked on chain) or a share kept in 1Password and
-//! unlocked with Touch ID (a paper share that lives in the password manager, see onepassword.rs).
+//! The setup is any the format allows (layout.rs): read from a plan file made by `vault plan`, or chosen
+//! inline with the same screens. Shares are numbered passphrase, YubiKeys, then paper and 1Password shares.
+//! A YubiKey share is a hardware share (masked on chain); a 1Password share is a paper share that lives in
+//! the password manager and is unlocked with Touch ID (see onepassword.rs).
 //!
-//! 1Password needs its servers, so the offline backup never runs `op`: it shows share 2 on a temporary
-//! paper, and `vault op-store` (`op_store` below) types it into 1Password later, on an online machine
-//! that never sees the seed, the passphrase or the paper share.
+//! 1Password needs its servers, so the offline backup never runs `op`: it shows each 1Password share on a
+//! temporary paper, and `vault op-store` (`op_store` below) types it into 1Password later, on an online
+//! machine that never sees the seed or any other share.
 
+use crate::layout::{Layout, ShareKind};
 use crate::onepassword;
 use crate::prompt::*;
+use crate::score::combinations;
+use crate::setup;
+use crate::sheet::{self, Locator};
 use epn_core::bip39::{entropy_to_words, new_passphrase, words_to_entropy};
-use epn_core::record::{
-    ARGON_M_KIB, ARGON_T, Kind, new_header, pad, seal, stretch_passphrase, unseal,
-};
+use epn_core::record::{ARGON_M_KIB, ARGON_T, new_header, pad, seal, stretch_passphrase, unseal};
 use epn_core::{fido, hex, os_random, record_id, seed_fingerprint};
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
-
-const PASS_X: u8 = 1;
-const KEY_X: u8 = onepassword::X; // the YubiKey and the 1Password share are alternatives at x = 2
-const PAPER_X: u8 = 3;
-
-/// The second factor: a YubiKey (its credential id) or 1Password (the account and vault share 2 goes into).
-enum Second {
-    YubiKey(String),
-    OnePassword { account: String, vault: String },
-}
-
-impl Second {
-    fn kinds(&self) -> [Kind; 3] {
-        match self {
-            Second::YubiKey(_) => [Kind::Passphrase, Kind::Hardware, Kind::Paper],
-            Second::OnePassword { .. } => [Kind::Passphrase, Kind::Paper, Kind::Paper],
-        }
-    }
-    fn name(&self) -> &'static str {
-        match self {
-            Second::YubiKey(_) => "YubiKey (+ its PIN)",
-            Second::OnePassword { .. } => "1Password item (Touch ID)",
-        }
-    }
-}
 
 /// Make the user prove the passphrase is written down, exactly: restore normalises Unicode (NFKD) but not
 /// case or spaces.
@@ -82,51 +60,6 @@ fn confirm_paper_share(x: u8, words: &str) -> Result<(), String> {
     Err("paper share not confirmed".into())
 }
 
-/// The recovery sheet. `factor` is the line naming the second factor and `key_arg`/`stdin` complete the
-/// scripted restore for it; nothing on the sheet is secret.
-fn sheet(record: &[u8], second: &Second, op_ref: &str, fingerprint: &str) -> String {
-    let (factor, key_arg, stdin) = match second {
-        Second::YubiKey(cred) => (
-            format!("credential:       {cred}   (YubiKey, share {KEY_X}, rpId localhost)"),
-            format!(" --key {KEY_X}={cred}"),
-            format!("pass <passphrase>        paper {PAPER_X} <24 words>"),
-        ),
-        Second::OnePassword { account, .. } => (
-            format!(
-                "{}   (1Password asks for Touch ID)",
-                onepassword::sheet_line(onepassword::X, op_ref, account)
-            ),
-            String::new(),
-            format!(
-                "pass <passphrase>   paper {} <words from `op read --account {account} <reference>`>   paper {PAPER_X} <24 words>",
-                onepassword::X
-            ),
-        ),
-    };
-    format!(
-        "Recovery sheet. Nothing here is secret: keep several copies (paper, email, cloud).\n\n\
-         record id:        {id}   (SHA-256 of the record, first 8 bytes; `publish` prints the same id)\n\
-         record:           0x{record}\n\
-         seed fingerprint: {fingerprint}   (a verify-only restore must show the same)\n\
-         {factor}\n\n\
-         Where the record is stored on chain (printed by `publish`):\n\
-         chain id:         ________\n\
-         address:          __________________________________________\n\n\
-         read:     cast code <address> --rpc-url <rpc>   (the code is 00, then the record)\n\
-         restore:  vault restore   (guided, hidden prompts; choose \"verify only\" for a test restore)\n\
-         scripted: recover restore 0x{record}{key_arg}\n\
-         \x20         then type the factor lines on stdin, Ctrl-D to end (never in the command line):\n\
-         \x20           {stdin}\n\
-         format:   SPEC.md (print it with this sheet)\n\n\
-         Any two of: passphrase, {second_name}, paper share restore the seed.\n\
-         Keep a copy of the record (or this sheet) with the chain id, address and record id in the\n\
-         storage place of each factor too, so any two factors arrive with what they need.\n",
-        id = record_id(record),
-        record = hex(record),
-        second_name = second.name(),
-    )
-}
-
 /// Every file written after a secret was shown goes through here: synced to disk, so a crash right after
 /// cannot lose it, and a failure says plainly that the papers already written belong to no backup.
 fn save(path: &str, contents: &str) -> Result<(), String> {
@@ -136,7 +69,7 @@ fn save(path: &str, contents: &str) -> Result<(), String> {
         f.sync_all()
     };
     write().map_err(|e| {
-        format!("cannot write {path}: {e}\nThe backup is NOT saved. Destroy the papers written in this run (the passphrase, and the paper share if it was shown) and start again.")
+        format!("cannot write {path}: {e}\nThe backup is NOT saved. Destroy the papers written in this run (the passphrase, and any share already shown) and start again.")
     })
 }
 
@@ -190,35 +123,53 @@ fn output_dir() -> Result<String, String> {
 
 type Shares = Zeroizing<Vec<(u8, [u8; 32])>>;
 
-/// Seals the seed under the three factors and proves that every pair opens the record before anything is
-/// saved. `prf` is the YubiKey secret when share 2 is a YubiKey. Returns the record and the paper shares
-/// (x, share). Copies of the pads made along the way are wiped on a best-effort basis only (see main.rs).
+/// Seals the seed under the layout's shares and proves that every combination of k opens the record and
+/// gives the seed, before anything is saved. `pass` is the passphrase when the layout has one (share 1) and
+/// `prfs` the (x, secret) of each YubiKey share. Returns the record and the paper shares (x, share). Copies
+/// of the pads made along the way are wiped on a best-effort basis only (see main.rs).
 fn build_record(
     entropy: &[u8],
-    pass: &str,
-    kinds: &[Kind],
-    prf: Option<&[u8; 32]>,
+    pass: Option<&str>,
+    layout: &Layout,
+    prfs: &[(u8, [u8; 32])],
 ) -> Result<(Vec<u8>, Shares), String> {
-    let header = new_header(ARGON_M_KIB, ARGON_T, &os_random(16), 2, kinds)?;
-    let argon = Zeroizing::new(working(
-        "Stretching the passphrase (Argon2id, 1 GiB)",
-        || stretch_passphrase(pass, &header),
-    )?);
-    let mut pads: Shares = Zeroizing::new(Vec::with_capacity(2)); // never reallocates: no unwiped copy
-    pads.push((PASS_X, pad(&*argon, &header, PASS_X)));
-    if let Some(prf) = prf {
-        pads.push((KEY_X, pad(prf, &header, KEY_X)));
+    let (n, k) = (layout.n(), layout.k);
+    let header = new_header(
+        ARGON_M_KIB,
+        ARGON_T,
+        &os_random(16),
+        k,
+        &layout.record_kinds(),
+    )?;
+    // Every share fits: never reallocates, so no unwiped copy of a pad is left behind by a move.
+    let mut pads: Shares = Zeroizing::new(Vec::with_capacity(n));
+    if let Some(pass) = pass {
+        // The fixed share order puts the passphrase first.
+        debug_assert_eq!(layout.shares[0].kind, ShareKind::Passphrase);
+        let argon = Zeroizing::new(working(
+            "Stretching the passphrase (Argon2id, 1 GiB)",
+            || stretch_passphrase(pass, &header),
+        )?);
+        pads.push((1, pad(&*argon, &header, 1)));
+    }
+    for (x, prf) in prfs {
+        pads.push((*x, pad(prf, &header, *x)));
     }
     let (record, paper) = seal(&header, &pads, entropy, &mut os_random)?;
     let paper: Shares = Zeroizing::new(paper);
-    // One factor per share (pad or paper share), three in all: every pair must open the record.
-    let all: Shares = Zeroizing::new([pads.as_slice(), paper.as_slice()].concat());
-    for (i, j) in [(0, 1), (0, 2), (1, 2)] {
-        if *Zeroizing::new(unseal(&record, &[all[i], all[j]])?.0) != entropy {
+
+    // One factor per share (pad or paper share), by x, so share i is all[i].
+    let mut all: Shares = Zeroizing::new(Vec::with_capacity(n));
+    all.extend_from_slice(&pads);
+    all.extend_from_slice(&paper);
+    all.sort_unstable_by_key(|s| s.0); // in place: unlike the stable sort, no scratch buffer to leave behind
+    for c in combinations(n, k) {
+        let factors: Shares = Zeroizing::new(c.iter().map(|&i| all[i]).collect());
+        if *Zeroizing::new(unseal(&record, &factors)?.0) != entropy {
             return Err("self-check failed: nothing was saved, do not use this backup".into());
         }
     }
-    println!("Self-check passed: every pair of factors opens the record.");
+    println!("Self-check passed: every combination of {k} opens the record.");
     Ok((record, paper))
 }
 
@@ -230,165 +181,271 @@ fn paper_words(paper: &Shares, x: u8) -> Zeroizing<String> {
     Zeroizing::new(entropy_to_words(&share.1))
 }
 
-pub fn backup(device: Option<String>) -> Result<(), String> {
+/// One YubiKey share: its credential (made now or pasted) and its secret. A missing or wrong key, two keys
+/// plugged in or a wrong PIN is retried here, before the seed is typed. `earlier` holds the (label,
+/// credential id) of the YubiKey shares already done.
+fn yubikey_share(
+    label: &str,
+    earlier: &[(&str, &str)],
+    device: Option<&str>,
+    one_at_a_time: bool,
+) -> Result<(String, Zeroizing<[u8; 32]>), String> {
+    for _ in 0..TRIES {
+        if one_at_a_time {
+            pause(&format!("Plug in only {label}, then press Enter."))?;
+        }
+        match try_yubikey(label, earlier, device) {
+            Ok(done) => return Ok(done),
+            // fido::device_path refuses to guess between keys; the owner only has to unplug one.
+            Err(e) if e.starts_with("several FIDO2 keys found") => println!(
+                "More than one key is plugged in: unplug the other keys, leave only {label}, and try again."
+            ),
+            Err(e) => println!("{e}"),
+        }
+    }
+    Err(format!("{label} was not set up; nothing was saved"))
+}
+
+fn try_yubikey(
+    label: &str,
+    earlier: &[(&str, &str)],
+    device: Option<&str>,
+) -> Result<(String, Zeroizing<[u8; 32]>), String> {
+    let pasted = ask(&format!(
+        "Paste the credential id if {label} already has one from `vault`, or press Enter to make a new one: "
+    ))?;
+    let made = pasted.is_empty();
+    let cred = if made {
+        println!("Making a credential: enter the YubiKey PIN, then touch the key when it blinks.");
+        let new = fido::enroll(device)?;
+        println!("credential id: {new}\n(it is saved on the recovery sheet; it is not secret)");
+        new
+    } else {
+        fido::check_cred_id(&pasted)?; // a typo is found now, not after the seed and the papers
+        pasted
+    };
+    if let Some((other, _)) = earlier.iter().find(|(_, c)| *c == cred) {
+        return Err(format!(
+            "that credential id is already {other}'s: each YubiKey share needs its own key"
+        ));
+    }
+    // Each YubiKey share must be a different physical key: otherwise a missed swap, or a pasted id that is
+    // really on an earlier key, puts two shares on one key while the self-check still passes and the score
+    // calls the setup strong. The key's listing must hold this share's credential and none of an earlier
+    // share's. It is asked for only once this share's credential exists: on a key with no credential for the
+    // rp id the tool may fail, not list nothing. The first key needs no listing: `fido::secret` below fails
+    // for a pasted id that is not on it.
+    if !earlier.is_empty() {
+        println!("Checking which key this is: enter the YubiKey PIN (no touch needed).");
+        let listed = fido::credentials(device)?;
+        let unused = if made {
+            " (the credential just made on it is unused and does no harm)"
+        } else {
+            ""
+        };
+        if let Some((other, _)) = earlier.iter().find(|(_, c)| listed.iter().any(|l| l == c)) {
+            return Err(format!(
+                "this is the same key as {other}; plug in {label}{unused}"
+            ));
+        }
+        if !listed.contains(&cred) {
+            return Err(format!(
+                "credential {cred} is not on this key: plug in {label}, or paste the id made on it"
+            ));
+        }
+    }
+    println!("Enter the YubiKey PIN, then touch the key when it blinks.");
+    let secret = Zeroizing::new(fido::secret(&cred, device).map_err(|e| {
+        // Unlisted, a pasted id may simply not be on this key: the tool's failure cannot tell that from a
+        // wrong PIN, so both are named.
+        if !made && earlier.is_empty() && e.starts_with("fido2-assert failed") {
+            format!(
+                "{e}\nIf the PIN was right, this credential id is not on the plugged-in key: plug in {label}, or paste the id made on it."
+            )
+        } else {
+            e
+        }
+    })?);
+    Ok((cred, secret))
+}
+
+pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), String> {
+    // A plan file is untrusted input: it is refused here, before a folder is made or a secret is typed.
+    let planned = match &setup {
+        Some(path) => {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+            Some((path, Layout::parse_plan(&text)?))
+        }
+        None => None,
+    };
+    let layout = match planned {
+        Some((path, layout)) => {
+            clear();
+            println!(
+                "Setup from {path} (places were checked in vault plan; only the scores that need none are shown):"
+            );
+            if !setup::review(&layout, None)? {
+                return Err(
+                    "setup not accepted: nothing was made. Change it with `vault plan`.".into(),
+                );
+            }
+            layout
+        }
+        // The places asked for here only score the setup: dropped at once, never saved.
+        None => setup::choose()?.0,
+    };
+    // --device names one path, so every key would be read there; several keys are plugged in one at a time.
+    let yubikeys = layout
+        .shares
+        .iter()
+        .filter(|s| s.kind == ShareKind::YubiKey)
+        .count();
+    if device.is_some() && yubikeys > 1 {
+        return Err(format!(
+            "--device names one key, but this setup has {yubikeys} YubiKeys: run it without --device, and \
+             plug in one key at a time when asked. Nothing was made."
+        ));
+    }
     let dir = output_dir()?;
+
+    let (n, k) = (layout.n(), layout.k);
+    let of = |wanted: fn(&ShareKind) -> bool| -> Vec<usize> {
+        (0..n).filter(|&i| wanted(&layout.shares[i].kind)).collect()
+    };
+    let keys = of(|s| *s == ShareKind::YubiKey);
+    let papers = of(|s| matches!(s, ShareKind::Paper | ShareKind::OnePassword { .. }));
+    let has_pass = layout.shares[0].kind == ShareKind::Passphrase;
+    let label = |i: usize| layout.shares[i].label.as_str();
+
+    // The step list, so the screen can say "i/N" with N from this setup.
+    let mut steps: Vec<&str> = keys.iter().map(|&i| label(i)).collect();
+    steps.push("seed");
+    if has_pass {
+        steps.push("passphrase");
+    }
+    steps.push("build, check and save the public files");
+    steps.extend(papers.iter().map(|&i| label(i)));
+    steps.push("next steps");
+    let total = steps.len();
+    let mut at = 0;
+    let mut heading = |title: &str, secret: bool| {
+        at += 1;
+        step(at, total, title, secret);
+    };
 
     clear();
     println!(
-        "2-of-3 seed backup: passphrase + YubiKey or 1Password + paper share (any two restore your seed).\n"
+        "Seed backup: {} (any {k} restore your seed).\n",
+        layout.summary()
     );
-    println!(
-        "Steps: 1 second factor  2 seed  3 passphrase  4 build, check and save the public files  5 paper share  6 next steps\n"
-    );
+    let overview: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{} {s}", i + 1))
+        .collect();
+    println!("Steps: {}\n", overview.join("  "));
     println!("Before you start:");
     println!("  - go OFFLINE (turn off wifi and unplug ethernet) and close other apps");
-    println!("  - have paper and a pen ready, and the YubiKey plugged in if you use one");
+    let mut ready = vec!["paper and a pen"];
+    ready.extend(keys.iter().map(|&i| label(i)));
+    println!("  - have ready: {}", ready.join(", "));
     println!("  - nobody should be able to see the screen\n");
     println!("The public files will be saved in ./{dir}/ (checked writable).");
     pause("Press Enter when you are offline and ready.")?;
 
-    println!();
-    step(1, 6, &format!("Second factor (share {KEY_X})"), false);
-    let options = [
-        "YubiKey: a hardware key, unlocked with its PIN and a touch",
-        "1Password: a 1Password item, unlocked with Touch ID (stored later, online, with `vault op-store`)",
-    ];
-    let second = if choose("Which second factor?", &options)? == 0 {
-        let id = ask(
-            "Paste the credential id if this key already has one from `vault`, or press Enter to make a new one: ",
-        )?;
-        Second::YubiKey(if id.is_empty() {
-            println!(
-                "Making a credential: enter the YubiKey PIN, then touch the key when it blinks."
-            );
-            let new = fido::enroll(device.as_deref())?;
-            println!("credential id: {new}\n(it is saved on the recovery sheet; it is not secret)");
-            new
-        } else {
-            fido::check_cred_id(&id)?; // a typo is found now, not after the seed and the papers
-            id
-        })
-    } else {
-        // Both asked for explicitly: with several accounts signed in, a default would let `op` choose, and
-        // a work account (whose admins can reach it, and which ends with the job) must never be chosen silently.
-        println!(
-            "Use a PERSONAL 1Password account, never a work one. `op account list` shows yours."
-        );
-        let account = ask(
-            "1Password account for share 2 (sign-in address or email, e.g. my.1password.com): ",
-        )?;
-        onepassword::check_account(&account)?;
-        let vault = ask(&format!(
-            "Vault in that account (`op vault list --account {account}` lists them): "
-        ))?;
-        onepassword::check_name("vault name", &vault)?;
-        println!(
-            "Keep the passphrase and the paper share OUT of this 1Password account: one account would then"
-        );
-        println!("hold two factors, and one breach of it would be enough to restore the seed.");
-        println!(
-            "1Password needs the network, so this backup does not touch it: share 2 is shown as 24 words for a"
-        );
-        println!(
-            "TEMPORARY paper, and `vault op-store` puts it into 1Password later, on your online machine."
-        );
-        Second::OnePassword { account, vault }
-    };
+    // The keys first: a missing key or a wrong PIN fails before the seed is typed.
+    let mut creds: Vec<Option<String>> = vec![None; n];
+    // Never reallocates: a move would leave an unwiped copy of a key's secret.
+    let mut prfs: Shares = Zeroizing::new(Vec::with_capacity(keys.len()));
+    // The key is found by listing, which refuses to pick between two: one at a time (--device was refused).
+    let one_at_a_time = keys.len() > 1;
+    for (done, &i) in keys.iter().enumerate() {
+        let x = i as u8 + 1;
+        println!();
+        heading(&format!("{} (share {x})", label(i)), false);
+        let earlier: Vec<(&str, &str)> = keys[..done]
+            .iter()
+            .map(|&j| (label(j), creds[j].as_deref().expect("set above")))
+            .collect();
+        let (cred, secret) = yubikey_share(label(i), &earlier, device.as_deref(), one_at_a_time)?;
+        prfs.push((x, *secret));
+        creds[i] = Some(cred);
+    }
 
     println!();
-    step(2, 6, "Seed (typed hidden, twice)", true);
+    heading("Seed (typed hidden, twice)", true);
     let entropy = enter_seed()?;
 
     // Generated, shown once, then proven.
-    let pass = Zeroizing::new(new_passphrase(12));
-    clear();
-    step(3, 6, "Passphrase (7 generated words)", true);
-    println!("Write it on paper now, in lowercase, one space between words.");
-    println!(
-        "Keep it apart from the paper share and from the second factor. It is NOT a wallet seed.\n"
-    );
-    show_words("passphrase:", &pass);
-    println!();
-    pause("Press Enter once it is written down; the screen will be cleared.")?;
-    confirm_passphrase(&pass)?;
+    let pass = if has_pass {
+        let pass = Zeroizing::new(new_passphrase(12));
+        clear();
+        heading("Passphrase (12 generated words)", true);
+        println!("Write it on paper now, in lowercase, one space between words.");
+        println!("Keep it apart from the other shares. It is NOT a wallet seed.\n");
+        show_words("passphrase:", &pass);
+        println!();
+        pause("Press Enter once it is written down; the screen will be cleared.")?;
+        confirm_passphrase(&pass)?;
+        Some(pass)
+    } else {
+        None
+    };
 
     clear();
-    step(4, 6, "Building, checking and saving the backup", false);
-    let prf = match &second {
-        Second::YubiKey(cred) => {
-            println!("Enter the YubiKey PIN, then touch the key when it blinks.");
-            Some(Zeroizing::new(fido::secret(cred, device.as_deref())?))
-        }
-        Second::OnePassword { .. } => None,
-    };
-    let (record, paper) = build_record(&entropy, &pass, &second.kinds(), prf.as_deref())?;
+    heading("Building, checking and saving the backup", false);
+    let (record, paper) =
+        build_record(&entropy, pass.as_ref().map(|p| p.as_str()), &layout, &prfs)?;
 
     // Saved now, before any share leaves this process: once papers exist, the record they belong to must
-    // be on disk. The 1Password item's name is fixed by the record id, so the sheet can name it.
+    // be on disk. 1Password item names are fixed by the record id, so the sheet can name them.
     let fingerprint = seed_fingerprint(&entropy);
-    let title = format!("epn-share-{}-{}", onepassword::X, record_id(&record));
-    let op_ref = match &second {
-        Second::OnePassword { vault, .. } => onepassword::reference(vault, &title),
-        Second::YubiKey(_) => String::new(),
-    };
     save(
         &format!("{dir}/record.hex"),
         &format!("0x{}\n", hex(&record)),
     )?;
     save(
         &format!("{dir}/recovery-sheet.txt"),
-        &sheet(&record, &second, &op_ref, &fingerprint),
+        &sheet::render(&record, &layout, &creds, &fingerprint),
     )?;
     println!("Saved two PUBLIC files in ./{dir}/ : record.hex and recovery-sheet.txt");
 
-    let share_words = paper_words(&paper, PAPER_X);
-    println!();
-    step(5, 6, "Paper share (24 words)", true);
-    println!("Write it on paper, in a different place from the passphrase.");
-    println!(
-        "These 24 words look like a wallet seed but are NOT one. Label the paper \"backup share {PAPER_X}, not a wallet\".\n"
-    );
-    show_words(
-        &format!("paper share (this is share {PAPER_X}):"),
-        &share_words,
-    );
-    println!();
-    pause("Press Enter once it is written down; you will type all 24 words back.")?;
-    confirm_paper_share(PAPER_X, &share_words).map_err(|e| {
-        format!("{e}. This backup is NOT usable: delete ./{dir}/, destroy the passphrase and paper share papers, and start again.")
-    })?;
-    clear();
-
-    if let Second::OnePassword { .. } = &second {
-        let x = onepassword::X;
+    for &i in &papers {
+        let x = i as u8 + 1;
         let words = paper_words(&paper, x);
-        step(
-            5,
-            6,
-            &format!("Share {x} for 1Password (24 words, TEMPORARY paper)"),
-            true,
-        );
-        println!(
-            "Write it on its own paper, labelled \"share {x}, for 1Password, destroy after `vault op-store`\"."
-        );
-        println!(
-            "Never keep it with the paper share or the passphrase: any two of the three restore the seed.\n"
-        );
-        show_words(
-            &format!("share {x} for 1Password (TEMPORARY paper):"),
-            &words,
-        );
+        println!();
+        let title = if let ShareKind::OnePassword { .. } = layout.shares[i].kind {
+            heading(
+                &format!(
+                    "{} (share {x}) for 1Password (24 words, TEMPORARY paper)",
+                    label(i)
+                ),
+                true,
+            );
+            println!(
+                "Write it on its own paper, labelled \"share {x}, for 1Password, destroy after `vault op-store`\"."
+            );
+            println!("Never keep it with another share: any {k} shares restore the seed.\n");
+            format!("share {x} for 1Password (TEMPORARY paper):")
+        } else {
+            heading(&format!("{} (share {x}, 24 words)", label(i)), true);
+            println!("Write it on paper, kept apart from the other shares.");
+            println!(
+                "These 24 words look like a wallet seed but are NOT one. Label the paper \"backup share {x}, not a wallet\".\n"
+            );
+            format!("paper share (this is share {x}):")
+        };
+        show_words(&title, &words);
         println!();
         pause("Press Enter once it is written down; you will type all 24 words back.")?;
         confirm_paper_share(x, &words).map_err(|e| {
-            format!("{e}. This backup is NOT usable: delete ./{dir}/, destroy all three papers, and start again.")
+            format!("{e}. This backup is NOT usable: delete ./{dir}/, destroy every paper written in this run, and start again.")
         })?;
         clear();
     }
 
-    step(
-        6,
-        6,
+    heading(
         &format!(
             "Backup made. Seed fingerprint: {fingerprint}   record id: {}",
             record_id(&record)
@@ -396,57 +453,87 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
         false,
     );
     println!();
-    let mut next = vec![format!(
-        "TEST your papers now, offline: run `vault restore`, pick \"Verify only\" and try each pair of\n     \
-         factors in turn. Each must show fingerprint {fingerprint}. The seed is never shown."
+    let in_1password: Vec<usize> = papers
+        .iter()
+        .copied()
+        .filter(|&i| matches!(layout.shares[i].kind, ShareKind::OnePassword { .. }))
+        .collect();
+    let mut todo = vec![format!(
+        "TEST your shares now, offline: run `vault restore`, pick \"Verify only\" and try combinations of\n     \
+         {k} shares until every share has been used. Each must show fingerprint {fingerprint}. The seed is never shown."
     )];
-    if let Second::OnePassword { .. } = &second {
-        let x = onepassword::X;
-        next[0].push_str(&format!("\n     For share {x}, answer no to reading it from 1Password and type the temporary paper."));
-        next.push(format!(
-            "on your online machine with 1Password (never this one), put share {x} into 1Password:\n       \
+    if !in_1password.is_empty() {
+        todo[0].push_str(
+            "\n     For a 1Password share, answer no to reading it from 1Password and type its temporary paper.",
+        );
+    }
+    for &i in &in_1password {
+        let x = i + 1;
+        todo.push(format!(
+            "on your online machine with 1Password (never this one), put share {x} (\"{}\") into 1Password:\n       \
              vault op-store {dir}/recovery-sheet.txt\n     \
-             then DESTROY the temporary share-{x} paper (shred or burn it)"
+             then DESTROY the temporary share-{x} paper (shred or burn it)",
+            label(i)
         ));
     }
-    next.push(format!(
+    todo.push(format!(
         "on an online machine, store the record on a chain (no secrets needed):\n       \
          publish <rpc-url> {dir}/record.hex <refund-address>\n     \
          it deploys the record as contract code from a throwaway key and prints chain id and address"
     ));
-    next.push(
+    todo.push(
         "write chain id and address on the recovery sheet; keep several copies, and put a copy of the\n     \
-         record (or the sheet) with these locators in the storage place of each factor paper too"
+         record (or the sheet) with these locators in the storage place of each share too"
             .to_string(),
     );
     println!("Next:");
-    for (i, item) in next.iter().enumerate() {
+    for (i, item) in todo.iter().enumerate() {
         println!("  {}. {item}", i + 1);
     }
     Ok(())
 }
 
-/// `vault op-store`: the online half of a 1Password backup. Share 2 is typed (twice) from the temporary
-/// paper and stored in the item the recovery sheet names, then read back through the path a restore
-/// uses. Only share 2 is ever on this machine, which is why it may be online.
+/// `vault op-store`: the online half of a 1Password share. The share is typed (twice) from its temporary
+/// paper and stored in the item the recovery sheet names, then read back through the path a restore uses.
+/// Only that one share is ever on this machine, which is why it may be online.
 pub fn op_store(sheet_path: &str) -> Result<(), String> {
-    let x = onepassword::X;
     let text = std::fs::read_to_string(sheet_path)
         .map_err(|e| format!("cannot read {sheet_path}: {e}"))?;
-    let r = onepassword::sheet_references(&text)
+    // (x, label, reference, account) of each 1Password share; old sheets name share 2 with no label.
+    let mut shares: Vec<(u8, String, String, String)> = sheet::parse(&text)
         .into_iter()
-        .find(|r| r.x == x)
-        .ok_or(
-            "this recovery sheet names no 1Password share (was the backup made with a YubiKey?)",
-        )?;
-    let (vault, title) = onepassword::split_reference(&r.reference)?;
+        .filter_map(|s| match s.locator {
+            Locator::OnePassword { reference, account } => Some((s.x, s.label, reference, account)),
+            _ => None,
+        })
+        .collect();
+    let pick = match shares.len() {
+        0 => {
+            return Err(
+                "this recovery sheet names no 1Password share (was the backup made with a YubiKey?)"
+                    .into(),
+            );
+        }
+        1 => 0,
+        _ => {
+            let items: Vec<String> = shares
+                .iter()
+                .map(|(x, label, ..)| format!("share {x}: {label}"))
+                .collect();
+            let items: Vec<&str> = items.iter().map(String::as_str).collect();
+            choose("Which 1Password share?", &items)?
+        }
+    };
+    // The item title, epn-share-<x>-<record id>, comes from the sheet's reference: restore reads that same
+    // reference, so the share must be stored under it exactly.
+    let (x, _, reference, account) = shares.swap_remove(pick);
+    let (vault, title) = onepassword::split_reference(&reference)?;
     clear();
     println!(
-        "Store share {x} in 1Password: account {}, vault \"{vault}\", item \"{title}\".",
-        r.account
+        "Store share {x} in 1Password: account {account}, vault \"{vault}\", item \"{title}\"."
     );
     println!(
-        "Type it from the temporary paper. Only share {x} goes here: never the seed, the passphrase or share {PAPER_X}.\n"
+        "Type it from the temporary paper. Only share {x} goes here: never the seed or another share.\n"
     );
     let words = enter_paper_share(x)?;
     println!("\nAgain, to catch a word that is a valid word but the wrong one:");
@@ -459,11 +546,10 @@ pub fn op_store(sheet_path: &str) -> Result<(), String> {
     println!(
         "\nChecking that the item does not exist yet (1Password may ask for Touch ID; a message that it is not found is expected)."
     );
-    match onepassword::read(&r.account, &r.reference) {
+    match onepassword::read(&account, &reference) {
         Ok(existing) if *existing == *words => {
             println!(
-                "Share {x} is already in 1Password as {} (checked). Now destroy the temporary share-{x} paper.",
-                r.reference
+                "Share {x} is already in 1Password as {reference} (checked). Now destroy the temporary share-{x} paper."
             );
             return Ok(());
         }
@@ -485,10 +571,10 @@ pub fn op_store(sheet_path: &str) -> Result<(), String> {
     }
 
     println!("Storing share {x}. 1Password may ask for Touch ID.");
-    let reference = onepassword::store(&r.account, vault, title, &words)?;
+    let stored = onepassword::store(&account, vault, title, &words)?;
     // Read back through the same path a restore uses: a wrong vault, a sync problem or a template
     // 1Password does not accept is caught now and not on the day the share is needed.
-    let back = onepassword::read(&r.account, &reference).map_err(|e| {
+    let back = onepassword::read(&account, &stored).map_err(|e| {
         format!("{e}\nThe item \"{title}\" may now exist: check vault \"{vault}\" and delete it before running this again.")
     })?;
     if *back != *words {
@@ -496,9 +582,9 @@ pub fn op_store(sheet_path: &str) -> Result<(), String> {
             "the item read back is not the share typed: delete the item \"{title}\" and run this again"
         ));
     }
-    println!("Share {x} is in 1Password as {reference} (read back and checked).");
+    println!("Share {x} is in 1Password as {stored} (read back and checked).");
     println!(
-        "Now destroy the temporary share-{x} paper (shred or burn it): with the paper share it would restore the seed."
+        "Now destroy the temporary share-{x} paper (shred or burn it): with other shares it would restore the seed."
     );
     Ok(())
 }

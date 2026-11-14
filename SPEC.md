@@ -21,7 +21,9 @@ give `K`, fewer give nothing. Each share has a kind that says where it lives:
 Share i (i = 1..n) is the share at x = i. At most one share is a passphrase share (a second one would be
 the same secret under another pad). Any number of hardware and paper shares is allowed, and a record may
 have no passphrase share or no on-chain share at all (all paper). A record that breaks these rules is
-refused. `vault` makes 2-of-3: passphrase (x=1), YubiKey (x=2), paper (x=3).
+refused. `vault` makes any setup this allows: you choose the shares and k, and it numbers them in a fixed order,
+the passphrase (if any) at x=1, then the YubiKeys, then the paper and 1Password shares. The recovery sheet
+names every share with its x.
 
 ## Record
 
@@ -105,14 +107,17 @@ word") is not part of this backup.
   with its credential id.
 - **Paper share**: 32 bytes as 24 BIP39 English words (standard entropy-to-words encoding, checksum
   included). It looks like a seed and is not one. Where it is kept is not part of the format: `vault`
-  can keep share 2 in 1Password instead of on a YubiKey, as a Password item whose value is the 24 words,
-  named `epn-share-2-<record id>` and read with `op read --account <account> op://<vault>/<item>/password`
-  (1Password asks for Touch ID). The recovery sheet names it on a line
-  `1password: share 2 op://<vault>/<item>/password account <account>`; the account is always given,
-  because with several accounts signed in `op` would otherwise pick one. Such a share must sit in a
-  personal account, never a work one, and not in the same account as another factor of the record.
-  `op` needs 1Password's servers, so `vault backup` (offline) only shows the share for a temporary
-  paper; `vault op-store <sheet>` stores it later on an online machine that never holds another factor.
+  can keep a paper share (any x, and there may be several) in 1Password, as a Password item whose value is
+  the 24 words, named `epn-share-<x>-<record id>` for that share's x and read with
+  `op read --account <account> op://<vault>/<item>/password` (1Password asks for Touch ID). The recovery
+  sheet names it on that share's line, which ends with
+  `op://<vault>/<item>/password account <account>`; the account is always given, because with
+  several accounts signed in `op` would otherwise pick one. (Sheets made before setups were flexible
+  named only share 2, on a line `1password: share 2 op://<vault>/<item>/password account <account>`;
+  `vault restore` still reads them.) Such a share must sit in a personal account, never a work one, and not
+  in the same account as another factor of the record. `op` needs 1Password's servers, so `vault backup`
+  (offline) only shows the share for a temporary paper; `vault op-store <sheet>` stores it later on an
+  online machine that never holds another factor (it asks which share when the sheet names several).
 
 Using a YubiKey also needs its credential id (base64, printed by `vault backup` and on the recovery
 sheet). It is not secret and is useless without the key. If the sheet is lost it can be listed from the
@@ -149,10 +154,12 @@ is refused.
 The normal way is `vault restore`: it reads every secret at a hidden prompt on the terminal. `recover` is
 the small scriptable tool:
 
-    recover restore <record-hex> [--key X=CRED_ID]... [--device PATH] [--allow-unsafe-host]   < factors
+    recover restore <record-hex> [--key X=CRED_ID[@PATH]]... [--device PATH] [--allow-unsafe-host]   < factors
 
 `--key X=CRED_ID` (repeatable) asks the YubiKey that is share X for its secret through libfido2 (PIN and
-touch); `--device` picks the device when several are plugged in. stdin holds one factor per line, in any
+touch); `--device` picks the device when several are plugged in. With two or more YubiKeys plugged in at
+once, give each key its own device as `--key X=CRED_ID@PATH` (`fido2-token -L` lists the paths); a key
+without `@PATH` uses `--device`, else the only key found. stdin holds one factor per line, in any
 order, blank lines ignored:
 
     pass <passphrase>          the passphrase: everything after the first space, not trimmed

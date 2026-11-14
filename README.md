@@ -1,7 +1,7 @@
 # Ethereum Private Note
 
-Back up a BIP39 wallet seed so that **any two of three factors** restore it, and **no single factor
-reveals anything**:
+Back up a BIP39 wallet seed so that **any k of n factors** restore it, and **fewer than k reveal
+nothing**. The usual setup, and the one described below, is 2 of 3:
 
 | factor | what it is | where it lives |
 |--------|------------|----------------|
@@ -14,8 +14,9 @@ shares are masked with pads derived from the passphrase and the YubiKey. The res
 **record** that is public by design: it can be stored on any EVM chain, emailed to yourself, printed, kept
 in the cloud. Without two factors it is noise.
 
-The format is k-of-n (2 <= k <= n <= 5; any number of hardware and paper shares, at most one passphrase share); `vault` makes
-the 2-of-3 above. `SPEC.md` describes the format completely (enough to write a recovery tool in another
+The format is k-of-n (2 <= k <= n <= 5; any number of hardware and paper shares, at most one passphrase share),
+and `vault` makes any setup it allows: you choose the shares and k, for example 2 of 4 with two YubiKeys, and
+`vault plan` scores the choice before you commit (see [Planning a setup](#planning-a-setup)). `SPEC.md` describes the format completely (enough to write a recovery tool in another
 language) and `vectors.json` fixes every intermediate value.
 
 > **Status.** Personal tool, not independently audited. The `publish` step has been tested against a
@@ -29,6 +30,7 @@ language) and `vectors.json` fixes every intermediate value.
 - [Repository layout](#repository-layout)
 - [Install](#install)
 - [Recommended setup](#recommended-setup)
+- [Planning a setup](#planning-a-setup)
 - [Making a backup](#making-a-backup)
 - [Publishing the record on chain](#publishing-the-record-on-chain)
 - [Testing the backup](#testing-the-backup)
@@ -40,6 +42,8 @@ language) and `vectors.json` fixes every intermediate value.
 ---
 
 ## How it works
+
+The picture is the 2-of-3 setup; other setups split K into more shares the same way.
 
 ```
 seed entropy ──AES-256-GCM(K)──► ciphertext ─┐
@@ -65,7 +69,7 @@ record.
 | path | what |
 |------|------|
 | `core/` (`epn-core`) | the format: Argon2id, HKDF, GF(2^8) Shamir, AES-GCM, BIP39 words, FIDO2 via libfido2 |
-| `vault/` (`vault`) | interactive wizard: **backup**, guided **restore**, and **op-store** (puts share 2 into 1Password) |
+| `vault/` (`vault`) | interactive wizard: **plan** (design and score a setup, no secrets), **backup**, guided **restore**, and **op-store** (puts a 1Password share into 1Password) |
 | `recover/` (`recover`) | small, scriptable **restore-only** tool; the one to keep for emergencies |
 | `publish/` (`publish`) | online step: deploys the record as contract code from a throwaway gas key ([details](publish/README.md)) |
 | `SPEC.md`, `vectors.json` | the backup format, and fixed test vectors for it |
@@ -123,14 +127,15 @@ the offline machine you will use.
   unplugged for the whole session. It needs 2 GiB of free RAM (Argon2id uses 1 GiB).
 - **A YubiKey 5 (or any FIDO2 key with `hmac-secret`) with a FIDO2 PIN set.** Set the PIN first, for
   example with `ykman fido access change-pin`. Without a PIN the key cannot be used.
-  **Or 1Password with Touch ID** instead of the YubiKey: share 2 is then kept as a 1Password item and
+  With more YubiKeys in the setup, you need one **physically different** key for each share.
+  **Or 1Password with Touch ID** instead of a YubiKey: that share is then kept as a 1Password item and
   read back with Touch ID. Install the `op` command and turn on *Settings > Developer > Integrate with
   1Password CLI* in the 1Password app. This is a weaker factor than a YubiKey: the share syncs with
   your 1Password account and is as safe as that account, not tied to one device. Use a **personal**
   account, never a work one (its admins can reach it, and you lose it with the job); `vault` asks for
   the account explicitly and passes it to every `op` call. **Never keep the passphrase or the paper
   share in that same account**, or one breach of it gives two factors. The `op` command needs
-  1Password's servers, so the offline backup never runs it: share 2 goes on a temporary paper and is
+  1Password's servers, so the offline backup never runs it: a 1Password share goes on a temporary paper and is
   put into 1Password afterwards, on your online machine, with `vault op-store`.
 - **Paper and a pen** for the passphrase and the paper share. Steel plates if you want fire/water resistance.
 - **An online machine** for `publish` (later, no secrets involved).
@@ -138,17 +143,20 @@ the offline machine you will use.
 
 ### Where to keep things
 
-The rule: **no single place holds two factors.** A suggested layout:
+The rule: **no single place holds k factors**, or one break-in opens the backup (for 2 of 3, no place holds
+two). A suggested layout for 2 of 3:
 
 | place | keeps |
 |-------|-------|
 | home safe | passphrase paper |
-| on you / your desk | YubiKey (its PIN in your head or your password manager, never on the key), or share 2 in 1Password |
+| on you / your desk | YubiKey (its PIN in your head or your password manager, never on the key), or the share in 1Password |
 | second location (bank box, trusted family) | paper share, labelled *"backup share 3, not a wallet"* |
 | anywhere, several copies | recovery sheet, `record.hex`, a printout of `SPEC.md` |
 
-Losing one factor is survivable: the other two still restore. Restore at once and make a new backup,
-because you are now one loss away from losing the seed.
+`vault plan` (see *Planning a setup*) checks a layout like this for you.
+
+With 2 of 3, losing one factor is survivable: the other two still restore. Restore at once and make a new
+backup, because you are now one loss away from losing the seed.
 
 ### Choosing a chain
 
@@ -156,69 +164,148 @@ The chain is one durable copy of the public record, not the only one. Pick one y
 alive and readable for decades, with cheap storage of ~150 bytes. Any EVM chain works: the record is
 stored as the code of a new contract, so nothing needs to be deployed on the chain beforehand.
 
-## Making a backup
-
-On the **offline** machine, with the YubiKey plugged in:
+## Planning a setup
 
 ```bash
-./vault backup                  # or just ./vault and pick "Make a new backup"
-./vault backup --device PATH    # when several FIDO2 keys are plugged in (see `fido2-token -L`)
+./vault plan                    # or just ./vault and pick "Plan a setup (no secrets)"
+```
+
+`vault plan` asks for no secret and writes no secret, so it may run on any machine, online too. Use it to
+try setups before you go offline. It walks through:
+
+1. **Choose a setup.** A preset, or Custom (add shares one at a time, then choose k):
+   - 2 of 3: passphrase, YubiKey, paper (the setup described in the rest of this file)
+   - 2 of 3: passphrase, 1Password, paper
+   - 2 of 4: passphrase, two YubiKeys, paper
+   - 3 of 5: passphrase, two YubiKeys, two paper shares
+   - Custom: any 2 to 5 shares and any k from 2 to n, with at most one passphrase share. A share is a
+     passphrase, a YubiKey, a paper share or a 1Password share (account and vault are asked for).
+
+   The shares are numbered in a fixed order, so the same setup always gets the same numbers: the passphrase
+   first, then the YubiKeys, then the paper and 1Password shares.
+2. **Labels.** Each share gets a neutral name ("YubiKey A", "paper B"); you may rename it. Labels are
+   printed on the recovery sheet, which is public, so never put a place in a label (the review screen warns
+   if one names a place you gave).
+3. **Places.** For each share, say where it will be kept ("home safe", "office", ...), from the places you
+   named so far or a new one.
+4. **Review and score.** Two separate verdicts, using the places:
+   - **Loss**, can you still restore after losing things. Weak if you can lose no share at all (n = k), or
+     if one place holds more than n - k shares, so a fire there locks you out. Ok if you can lose any one
+     share; strong if you can lose any two or more.
+   - **Theft**, what the cheapest combination costs a thief. Weak if one place holds a whole combination
+     of k shares, so one break-in opens the backup, or if a whole combination is 1Password shares in one
+     account, so one breach of that account opens it (checked with or without places). Otherwise ok if
+     some combination needs no YubiKey (a thief then needs the passphrase and a paper share, or a
+     1Password account, from different places), and strong if every combination needs a YubiKey and its
+     PIN (the key locks after repeated wrong PINs).
+
+   Every warning names the exact combination and suggests a fix: move a share elsewhere, raise k, or add a
+   share. The screen lists every combination of k shares that opens the backup. A weak setup is never
+   refused, but you must type `yes` to use it; for any other setup you press Enter.
+5. **Save.** `setup.txt` is written in the current folder (`setup-2.txt` and so on if one exists). It holds
+   the labels, kinds, k and the 1Password accounts and vaults, and **never the places**: a file that says
+   where every share lives is a map for a thief. The places are shown once, as a private "where things are"
+   list, and are saved nowhere: write it down where a thief would not look, or remember it. The screen is
+   cleared when you press Enter.
+
+The scores only judge the places you typed; they cannot know whether you keep to them.
+`vault backup setup.txt` re-checks the file as untrusted input (limits, labels, accounts), and shows only
+the verdicts that need no places.
+
+## Making a backup
+
+On the **offline** machine, with the YubiKey (or, for several, the YubiKeys) at hand:
+
+```bash
+./vault backup setup.txt        # the setup made by `vault plan`
+./vault backup                  # or just ./vault and pick "Make a new backup": choose the setup now
+./vault backup --device PATH    # one YubiKey, when several FIDO2 keys are plugged in (see `fido2-token -L`);
+                                # a setup with more than one YubiKey refuses --device
 ./vault backup --allow-unsafe-host   # only if you accept the host check's findings (see "The machine you use")
 ```
 
-`vault` refuses to run through a pipe; it needs a real terminal. Before asking for anything it creates
-the output folder `./backup-<timestamp>/` and checks that it can write there. Then it walks through six
-steps:
+Without a file, `vault backup` runs the same setup, places and scoring screens as `vault plan` first, and
+drops the places at once. With a file, it shows the setup and the verdicts that need no places (the places
+were checked in `vault plan`), then asks you to accept it.
 
-1. **Second factor.** Pick YubiKey (arrow keys, Enter), then press Enter to create a new resident credential (PIN,
-   then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it goes
-   on the recovery sheet. Or pick 1Password (Touch ID) and name the personal account (sign-in
-   address or email, see `op account list`) and a vault in it (see `op vault list --account <account>`).
-   Nothing is sent to 1Password during the backup: the sheet names the item `epn-share-2-<record id>`
-   that `vault op-store` creates later (see *Putting share 2 into 1Password*), and `vault restore`
-   offers to read it from there instead of typing it.
+`vault` refuses to run through a pipe; it needs a real terminal. A plan file is checked before anything
+else (a bad one is refused before a folder is made or a secret typed). Then it creates the output folder
+`./backup-<timestamp>/` and checks that it can write there. The steps are numbered on screen ("i/N"); what
+N is depends on the setup:
+
+1. **Each YubiKey, one at a time.** For each YubiKey share, press Enter to create a new resident credential
+   (PIN, then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it
+   goes on the recovery sheet. With several YubiKeys, `vault` says "Plug in only YubiKey B": plug in just
+   that key and press Enter, so that exactly one key is found (a setup with more than one YubiKey refuses
+   `--device`). After the credential, its secret is read (PIN and touch). The keys come before the seed,
+   so a missing key or a wrong PIN fails before you type anything.
+
+   **Each YubiKey share must be a different physical key.** Otherwise a missed swap, or a pasted id that
+   is really on an earlier key, would put two shares on one key, and the self-check would still pass. For
+   every key after the first, `vault` asks for the PIN once more (no touch), lists the credentials on the
+   key and refuses a key that holds an earlier share's credential ("this is the same key as YubiKey A")
+   or lacks this share's. (For the first key, reading the secret already fails if a pasted id is not on
+   it.) It also refuses a credential id used twice. This check relies on
+   `fido2-token -L -k localhost`, and has not been run against a real YubiKey yet (see
+   [Limitations](#limitations)).
 2. **Seed.** Type your 12–24 seed words (hidden), then type them again: both entries must give the same
    seed, because a typo that is another BIP39 word passes the checksum surprisingly often (1 in 16 for
    12 words). The **seed fingerprint** (8 hex digits, see `SPEC.md`) is shown; note it. Only the entropy
    is stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
-3. **Passphrase.** Twelve words are generated and shown once. Write them down in lowercase, one space
-   between words. The screen is cleared and you must type them back.
-4. **Build, check and save.** PIN and touch again (YubiKey only), then Argon2id (1 GiB, takes a while). Every pair of
-   factors is tried against the new record; if any pair fails, nothing is saved. Then the two public
-   files, `record.hex` and `recovery-sheet.txt`, are written (and synced to disk) **before** the paper
-   share is shown, so a crash later cannot leave you with papers and no record. If writing fails, `vault`
-   says so: destroy the papers of that run and start again.
-5. **Paper share.** 24 words are shown once. Write them on a *separate* paper and label it *"backup
-   share 3, not a wallet"*. Then type all 24 back (hidden); a mismatch shows the share again so you can
-   correct the paper. With 1Password, share 2 is shown the same way next: write it on a **temporary**
-   paper labelled *"share 2, for 1Password, destroy after `vault op-store`"*, kept apart from the
-   other two papers (any two of the three restore the seed), and type it back.
-6. **Next steps** are printed: test the papers with a verify-only restore, publish the record, fill in
-   the recovery sheet.
+3. **Passphrase** (if the setup has one). Twelve words are generated and shown once. Write them down in
+   lowercase, one space between words. The screen is cleared and you must type them back.
+4. **Build, check and save.** The YubiKey secrets were read at step 1; with a passphrase, Argon2id now
+   stretches it (1 GiB, takes a while).
+   **Every combination of k shares** is tried against the new record; if any combination fails, nothing
+   is saved. Then the two public files, `record.hex` and `recovery-sheet.txt`, are written (and synced to
+   disk) **before** any paper share is shown, so a crash later cannot leave you with papers and no
+   record. If writing fails, `vault` says so: destroy the papers of that run and start again.
+5. **Each paper and 1Password share, one at a time.** 24 words are shown once. Write them on a *separate*
+   paper and label it *"backup share X, not a wallet"*. Then type all 24 back (hidden); a mismatch shows
+   the share again so you can correct the paper. A 1Password share is shown the same way, but write it on
+   a **temporary** paper labelled *"share X, for 1Password, destroy after `vault op-store`"*, kept apart
+   from the other papers (any k shares restore the seed), and type it back. Nothing is sent to 1Password
+   during the backup: the sheet names the item `epn-share-<X>-<record id>` that `vault op-store` creates
+   later (see *Putting a 1Password share into 1Password*), and `vault restore` offers to read it from
+   there instead of typing it.
+6. **Next steps** are printed: test the papers with a verify-only restore, run `vault op-store` for each
+   1Password share, publish the record, fill in the recovery sheet.
 
-The recovery sheet holds the record id, the record, the seed fingerprint, the credential id (or the
-1Password reference) and blanks
-for the chain id and the record's address. Print it, together with `SPEC.md`, and keep a copy of it (or
-of `record.hex` and these locators) in the storage place of every factor paper too.
+The recovery sheet has one line per share, in share order, naming it by number, kind and label, and how to
+reach it, and never where it is kept. For example, for 2 of 4 with two YubiKeys:
+
+```
+share 1:  passphrase   "passphrase"
+share 2:  yubikey      "YubiKey A"   credential <id>   (rpId localhost)
+share 3:  yubikey      "YubiKey B"   credential <id>   (rpId localhost)
+share 4:  paper        "paper"
+```
+
+A 1Password share's line ends with its `op://<vault>/<item>/password` reference and its account instead. The
+sheet also holds the record id, the record, the seed fingerprint, blanks for the chain id and the
+record's address, how to read and restore (including the `recover restore` command for this setup) and
+"Any k of: ..." with the labels. Print it, together with `SPEC.md`, and keep a copy of it (or of
+`record.hex` and these locators) in the storage place of every factor paper too.
 
 Then clear the terminal scrollback, and shut down the offline machine (or reboot the live OS).
 
-### Putting share 2 into 1Password
+### Putting a 1Password share into 1Password
 
-Only with the 1Password option, after the papers are tested (see *Testing the backup*). On your
+Only with a 1Password share, after the papers are tested (see *Testing the backup*). On your
 **online** machine with the 1Password app, never the machine that saw the seed:
 
 ```bash
 ./vault op-store backup-<timestamp>/recovery-sheet.txt
 ```
 
-It reads the account and item name from the sheet (public), asks for share 2 from the temporary paper,
-twice, and stores it (through stdin, never the command line or a file); 1Password asks for Touch ID.
-Before storing it checks that the item does not exist yet; that check fails when the item is missing, but
-also when 1Password is locked or offline, so it asks you to confirm in the 1Password app that the item is
-absent. It then reads the item back and compares. Running it again finds the item instead of making a
-duplicate. Then **destroy the temporary paper** (shred or burn it). Only share 2 is ever typed on this
-machine.
+It reads the account and item name from the sheet (public) and, when the sheet names several 1Password
+shares, asks which one to store. It asks for that share from its temporary paper, twice, and stores it
+(through stdin, never the command line or a file); 1Password asks for Touch ID. Before storing it checks
+that the item does not exist yet; that check fails when the item is missing, but also when 1Password is
+locked or offline, so it asks you to confirm in the 1Password app that the item is absent. It then reads
+the item back and compares. Running it again finds the item instead of making a duplicate. Then
+**destroy the temporary paper** (shred or burn it). Only that one share is ever typed on this machine;
+run it again for each further 1Password share.
 
 ## Publishing the record on chain
 
@@ -260,26 +347,28 @@ The output must be `0x00` followed by the contents of `record.hex` (without its 
 ## Testing the backup
 
 **Do not trust a backup you have not restored.** On the offline machine, right after making it, run
-`vault restore`, pick **Verify only** (the first, default item), and restore with each of the three pairs:
+`vault restore`, pick **Verify only** (the first, default item), and restore with combinations of k shares
+until every share has been used at least once. For 2 of 3, that is for example:
 
 1. passphrase + YubiKey
 2. passphrase + paper share
 3. YubiKey + paper share
 
-With 1Password, share 2 is still on its temporary paper at this point: answer **no** when `vault`
-offers to read it from 1Password (that needs the network) and type the paper.
+With a 1Password share, it is still on its temporary paper at this point: answer **no** when `vault`
+offers to read it from 1Password (that needs the network) and type the paper. With several YubiKeys, `vault`
+asks you to plug in one key at a time.
 
 Verify only prints the seed fingerprint instead of the seed, so a test never puts your seed on screen.
-It must equal the fingerprint on the recovery sheet. `vault` already checked all three pairs against
-the in-memory values; this test checks what you actually **wrote on paper**.
+It must equal the fingerprint on the recovery sheet. `vault` already checked every combination of k
+against the in-memory values; this test checks what you actually **wrote on paper**.
 
 Repeat a test every year or so, and whenever you move a factor, to find a smudged paper or a dead
 YubiKey while you still have the other two.
 
 ## Restoring
 
-You need the record (from the sheet, `record.hex`, or the chain) and any two factors. Do it offline:
-the seed is printed on screen. Reading share 2 from 1Password needs the network, so offline, open the
+You need the record (from the sheet, `record.hex`, or the chain) and any k factors (two, for 2 of 3). Do it
+offline: the seed is printed on screen. Reading a 1Password share needs the network, so offline, open the
 item in the 1Password app on another device and type its 24 words when `vault` asks.
 
 ### Guided: `vault restore`
@@ -290,13 +379,15 @@ item in the 1Password app on another device and type its 24 words when `vault` a
 
 Pick **Verify only** (seed fingerprint, never the seed; the default) or **Restore** (shows the seed) with
 the arrow keys and Enter. Paste the record
-hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the YubiKey credential
-id, or the 1Password item of share 2). Say which factors you have; the YubiKey is asked first so a
-missing key or wrong PIN fails before you type anything. A share kept in 1Password is offered from
-1Password (Touch ID); if that read fails, you are asked to type the paper instead. The paper share is
-entered word by word, the passphrase hidden. Three attempts. Verify only also lists any share you
-held that was not needed, since any pair opens the record: test such a share in another run. This is
-the normal way to restore: every secret is read at a hidden prompt.
+hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the share names, each
+YubiKey credential id and each 1Password item; sheets made by earlier versions of `vault` still work).
+Say which factors you have; the YubiKeys are asked first so a missing key or wrong PIN fails before you
+type anything, one at a time ("plug in only YubiKey B") when you hold several; if a key cannot be read
+(another key still plugged in, a wrong PIN), you are asked to plug it in again. A share kept in 1Password
+is offered from 1Password (Touch ID); if that read fails, you are asked to type the paper instead. Paper
+shares are entered word by word, the passphrase hidden. Three attempts. Verify only also lists any share
+you held that was not needed, since any k shares open the record: test such a share in another run. This
+is the normal way to restore: every secret is read at a hidden prompt.
 
 ### Scripted: `recover restore`
 
@@ -304,7 +395,7 @@ the normal way to restore: every secret is read at a hidden prompt.
 not land in `ps`. Run it alone, then type one factor per line and end with Ctrl-D:
 
 ```bash
-./recover restore <record-hex> [--key X=CRED_ID]... [--device PATH] [--allow-unsafe-host]
+./recover restore <record-hex> [--key X=CRED_ID[@PATH]]... [--device PATH] [--allow-unsafe-host]
 ```
 
 ```
@@ -313,9 +404,11 @@ paper <X> <24 words>     the paper share printed as share X
 hw <X> <64 hex digits>   a hardware secret, instead of --key
 ```
 
-`--key X=CRED_ID` asks the YubiKey that is share X for its secret (PIN and touch). For a backup made by
-`vault`, the YubiKey (or the 1Password share, typed as `paper 2 ...`) is share 2 and the paper share is
-share 3; the recovery sheet prints the exact command. Input is visible on screen, so mind the screen, but it never reaches shell history. **Never type
+`--key X=CRED_ID` asks the YubiKey that is share X for its secret (PIN and touch). With two or more
+YubiKeys plugged in at once, give each key its own device as `--key X=CRED_ID@PATH` (`fido2-token -L`
+lists the paths); a key without `@PATH` uses `--device`, else the only key found. A 1Password share is
+typed as `paper X ...`. Every share has its number X on the recovery sheet, which also prints the exact
+command for the backup (with `@<path>` placeholders when it has several YubiKeys). Input is visible on screen, so mind the screen, but it never reaches shell history. **Never type
 a factor into the command line itself**: your shell saves the whole line in its history file.
 
 The seed words go to stdout, the shares used to stderr. Exit code 0 is success, 1 is a failed restore,
@@ -344,7 +437,10 @@ same value a browser's WebAuthn PRF extension returns for rpId `localhost` and i
 |----------------|--------|
 | the record only | nothing: masked or missing shares |
 | record + any **one** factor | nothing about the seed, **but** see passphrase guessing below |
-| record + any **two** factors | the seed |
+| record + any **k** factors (**two**, for 2 of 3) | the seed |
+
+With k above 2, fewer than k factors still reveal nothing; testing a passphrase guess (see below) then
+takes k - 1 other shares, not one.
 
 The record is public, permanent and readable by anyone, forever. All confidentiality comes from the
 factors.
@@ -370,7 +466,9 @@ making a new backup does **not** help, because the old record stays attackable w
 - Its PIN is the only thing between a thief of the key and its factor. Never store the PIN with the key.
   FIDO2 locks the key after repeated wrong PINs.
 - The credential is tied to that physical key. It cannot be copied to a second YubiKey; a spare key
-  does not replace a lost one (the other two factors do).
+  does not replace a lost one (the other factors do, up to n - k lost shares). With several YubiKey
+  shares, each must be its own physical key: two shares on one key are one factor, however many the
+  setup counts. `vault backup` checks this as described under *Making a backup*.
 - **Never reset the FIDO2 application** on the key (`ykman fido reset`): that destroys the credential,
   and its factor with it.
 - The credential uses rpId `localhost`. Software on any machine the key is plugged into that can make
@@ -392,7 +490,8 @@ process memory. `vault` and `recover` therefore do two modest, heuristic things,
 - **Host check.** They refuse to start while a network interface is up (loopback and link-local do not
   count) or a known monitoring agent is installed, and say which. `--allow-unsafe-host` continues anyway,
   with the findings printed as a warning. The agent list is a few install paths: finding nothing proves
-  nothing. `vault op-store` is exempt (it is the online step and only types share 2).
+  nothing. `vault plan` (no secrets) and `vault op-store` (the online step; it types only the one
+  1Password share it stores) are exempt.
 - **Process hardening.** No core dumps; other processes of the same user cannot attach a debugger or read
   the process (Linux `PR_SET_DUMPABLE`, macOS `PT_DENY_ATTACH`); on Linux all memory is locked out of swap
   when `RLIMIT_MEMLOCK` leaves room for Argon2's 1 GiB (run as root, or raise the limit). This stops crash
@@ -450,8 +549,13 @@ with `cast code` against a node you trust before relying on it.
 - **Not independently audited.** Treat it as such.
 - **`publish` has not been run against a real network yet**, only a local `anvil` chain. Do a full
   test run on a testnet before mainnet. Legacy (non-EIP-1559) chains are unsupported.
-- `vault backup` makes only the 2-of-3 layout with one YubiKey. Other k-of-n layouts are in the format
-  and are restored by `recover` and `vault restore`, but nothing here creates them.
+- **The different-key check has not been run against a real YubiKey yet.** `vault backup` refuses a second
+  YubiKey share that is the same physical key as an earlier one by listing the credentials on the key
+  (`fido2-token -L -k localhost <device>`), which needs a YubiKey with FIDO2 credential management; the
+  tests only use fake keys. Until it has been tried on real hardware, confirm yourself that each YubiKey
+  share is on its own key: list each key's credentials with its PIN (the command under
+  [Restoring](#restoring)) and check that each credential id on the recovery sheet appears on exactly one key.
+- The scores from `vault plan` only judge the places you type. They warn and never block.
 - `recover` does not wipe secrets from memory after use (`vault` does).
 
 ## Development

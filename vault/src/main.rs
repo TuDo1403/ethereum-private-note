@@ -1,17 +1,21 @@
-//! `vault`: the guided backup and restore. Backup walks through the offline half step by step; restore asks
-//! which factors you have and walks through each; `op-store` is the online step that puts share 2 into
-//! 1Password.
+//! `vault`: the guided backup and restore. `plan` designs and scores a setup with no secrets; backup walks
+//! through the offline half step by step; restore asks which factors you have and walks through each;
+//! `op-store` is the online step that puts a 1Password share into 1Password.
 //!
-//! Secrets (seed, passphrase, paper share, YubiKey secret) live in memory only, wrapped in `Zeroizing`
+//! Secrets (seed, passphrase, paper shares, YubiKey secrets) live in memory only, wrapped in `Zeroizing`
 //! where the type allows. That is best effort: copies made by the format crate's helpers are not wiped. The
 //! real protection is running this on an offline machine and clearing the screen after each secret is shown.
 //!
 //! Nothing here is needed to restore: `recover` and SPEC.md stand alone.
 
 mod backup;
+mod layout;
 mod onepassword;
 mod prompt;
 mod restore;
+mod score;
+mod setup;
+mod sheet;
 
 use clap::{Parser, Subcommand};
 use epn_core::host;
@@ -36,10 +40,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Make a new backup of a seed (run it offline)
-    Backup,
+    Backup {
+        /// A setup file saved by `vault plan`; without one, the setup is chosen now
+        setup: Option<String>,
+    },
+    /// Design and score a setup with no secrets (any machine); saves it as setup.txt, without places
+    Plan,
     /// Restore a seed, or verify a backup without ever showing the seed
     Restore,
-    /// Put share 2 of a 1Password backup into 1Password (online; only share 2 is typed)
+    /// Put a 1Password share of a backup into 1Password (online; only that share is typed)
     OpStore {
         /// The backup's recovery-sheet.txt, which names the account and the item
         sheet: String,
@@ -54,30 +63,34 @@ fn run() -> Result<(), String> {
     for w in host::harden() {
         eprintln!("warning: {w}");
     }
-    // `op-store` is the one online step: only share 2 is typed, on a machine that never holds another factor.
-    if let Some(Cmd::OpStore { sheet }) = &cli.command {
-        return backup::op_store(sheet);
-    }
-    host::require_trusted_host(cli.allow_unsafe_host)?;
-    let backup = match cli.command {
-        Some(Cmd::Backup) => true,
-        Some(Cmd::Restore) => false,
-        Some(Cmd::OpStore { .. }) => unreachable!("returned above"),
+    let command = match cli.command {
+        Some(c) => c,
         None => {
             clear();
-            choose(
+            match choose(
                 "What do you want to do?",
                 &[
                     "Make a new backup of a seed",
+                    "Plan a setup (no secrets)",
                     "Restore a seed from a backup",
                 ],
-            )? == 0
+            )? {
+                0 => Cmd::Backup { setup: None },
+                1 => Cmd::Plan,
+                _ => Cmd::Restore,
+            }
         }
     };
-    if backup {
-        backup::backup(cli.device)
-    } else {
-        restore::restore_flow(cli.device)
+    // `plan` handles no secret and `op-store` types only one 1Password share on a machine that never holds
+    // another factor: both are meant to run online. Everything else types factors, so a keylogger would see them.
+    if !matches!(command, Cmd::Plan | Cmd::OpStore { .. }) {
+        host::require_trusted_host(cli.allow_unsafe_host)?;
+    }
+    match command {
+        Cmd::Backup { setup } => backup::backup(setup, cli.device),
+        Cmd::Plan => setup::plan(),
+        Cmd::Restore => restore::restore_flow(cli.device),
+        Cmd::OpStore { sheet } => backup::op_store(&sheet),
     }
 }
 

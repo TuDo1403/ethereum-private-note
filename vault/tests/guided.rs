@@ -1,6 +1,6 @@
 //! Drives the interactive `vault` through a pty with `expect` (skipped if it is not installed), with fake
-//! `fido2-cred` / `fido2-assert` on PATH standing in for the YubiKey. One backup, then a verify-only
-//! restore from the papers it printed.
+//! `fido2-*` and `op` tools on PATH standing in for YubiKeys and 1Password: `vault plan`, backups of
+//! several setups (chosen inline or read from a plan file), verify-only restores and `vault op-store`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -17,6 +17,8 @@ proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
 # echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
 proc secret {s} {
+    # spawn sets spawn_out at the top level; without this the stty read always fails and only the 10 s cap waits.
+    global spawn_out
     for {set i 0} {$i < 200} {incr i} {
         if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
         sleep 0.05
@@ -35,15 +37,27 @@ proc words_of {block} {
     foreach {all w} [regexp -all -inline {[0-9]+\. ([a-z]+)} $block] { lappend out $w }
     return $out
 }
+# The places screen: for each label, an existing place (its index in the list so far) or a new one.
+proc place {label index {new ""}} {
+    pick "Where will $label be kept?" $index
+    if {$new ne ""} { expect "New place"; send "$new\r" }
+}
+# Which fake YubiKey is plugged in (see KEYS_TOKEN).
+proc plug {key} { set f [open "$::env(WORK)/key" w]; puts $f $key; close $f }
 "#;
 
 const SCRIPT: &str = r#"
 spawn $env(VAULT) --allow-unsafe-host backup --device /dev/fake
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "How should this backup be split?" 0
+answer "Rename any of them?" n
+place passphrase 0 home
+place YubiKey 1 office
+place paper 2 parents
+expect "Press Enter to use this setup"; send "\r"
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 if {![file isdirectory $dir]} { fail "output folder not made before the start" }
 expect "offline and ready."; send "\r"
-pick "Which second factor?" 0
 expect "make a new one: "; send "\r"
 expect "credential id: Zm9vYmFy"
 
@@ -60,6 +74,7 @@ expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 
 # The public files exist before the paper share is shown.
+expect "Self-check passed: every combination of 2 opens the record."
 expect "Saved two PUBLIC files"
 if {![file exists $dir/record.hex] || ![file exists $dir/recovery-sheet.txt]} { fail "files not saved before the paper share" }
 expect -re {paper share \(this is share 3\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set sharec [words_of $expect_out(1,string)] }
@@ -80,8 +95,8 @@ expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
 answer "share 1: passphrase" y
-answer "share 2: YubiKey and its PIN" n
-answer "share 3: paper share (24 words)" y
+answer "share 2: YubiKey (YubiKey and its PIN)" n
+answer "share 3: paper (paper share (24 words))" y
 expect "exactly as written (hidden): "; send "$pass\r"
 type_words $sharec
 expect -re {Seed fingerprint: ([0-9a-f]{8})} {
@@ -97,13 +112,18 @@ puts "\nDIR=$dir FP=$fp"
 const SCRIPT_1PASSWORD: &str = r#"
 spawn $env(VAULT) --allow-unsafe-host backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
-expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
-expect "offline and ready."; send "\r"
-pick "Which second factor?" 1
+pick "How should this backup be split?" 1
+answer "Rename any of them?" n
 expect "PERSONAL 1Password account"
 expect "e.g. my.1password.com): "; send "my.1password.com\r"
 expect "lists them): "; send "Personal\r"
-expect "OUT of this 1Password account"
+expect "OUT of"
+place passphrase 0 home
+place 1Password 1 office
+place paper 2 parents
+expect "Press Enter to use this setup"; send "\r"
+expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
+expect "offline and ready."; send "\r"
 expect "Type your seed words"; secret $env(SEED)
 expect "Type them again"; secret $env(SEED)
 expect -re {Seed fingerprint: ([0-9a-f]{8})} { set fp $expect_out(1,string) }
@@ -111,12 +131,13 @@ expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){12})} { set pass [join [wo
 expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 expect "Saved two PUBLIC files"
-expect -re {paper share \(this is share 3\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set sharec [words_of $expect_out(1,string)] }
-expect "type all 24 words back"; send "\r"
-type_words $sharec
+# Shares are shown in share order: the 1Password share (2) before the paper share (3).
 expect -re {share 2 for 1Password \(TEMPORARY paper\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set shareb [words_of $expect_out(1,string)] }
 expect "type all 24 words back"; send "\r"
 type_words $shareb
+expect -re {paper share \(this is share 3\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set sharec [words_of $expect_out(1,string)] }
+expect "type all 24 words back"; send "\r"
+type_words $sharec
 expect "6/6 Backup made"
 expect "vault op-store $dir/recovery-sheet.txt"
 expect eof
@@ -146,8 +167,8 @@ expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
 answer "share 1: passphrase" n
-answer "share 2: 1Password item (Touch ID)" y
-answer "share 3: paper share (24 words)" y
+answer "share 2: 1Password (1Password item (Touch ID))" y
+answer "share 3: paper (paper share (24 words))" y
 answer "it asks for Touch ID?" y
 type_words $sharec
 expect -re {Seed fingerprint: ([0-9a-f]{8})} {
@@ -162,8 +183,8 @@ expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
 answer "share 1: passphrase" n
-answer "share 2: 1Password item (Touch ID)" y
-answer "share 3: paper share (24 words)" y
+answer "share 2: 1Password (1Password item (Touch ID))" y
+answer "share 3: paper (paper share (24 words))" y
 answer "it asks for Touch ID?" y
 expect "Type the 24 words from the paper instead"
 type_words $shareb
@@ -278,16 +299,43 @@ fn backup_then_verify_only_restore() {
         format!("record id:        {}", epn_core::record_id(&record)),
         format!("seed fingerprint: {fp}"),
         format!("record:           {}", record_hex.trim()),
-        "credential:       Zm9vYmFy".to_string(),
+        "share 1:  passphrase   \"passphrase\"".to_string(),
+        "share 2:  yubikey      \"YubiKey\"    credential Zm9vYmFy   (rpId localhost)".to_string(),
+        "share 3:  paper        \"paper\"".to_string(),
         "recover restore 0x".to_string(),
         "--key 2=Zm9vYmFy".to_string(),
         "vault restore".to_string(),
     ] {
         assert!(sheet.contains(&want), "sheet lacks {want:?}:\n{sheet}");
     }
+    assert!(
+        !sheet.contains("@<path>"),
+        "one key needs no path:\n{sheet}"
+    );
+    assert_no_places(&work, &dir);
     assert!(!dir.join(".write-test").exists());
     std::fs::remove_dir_all(&work).unwrap();
 }
+
+/// Places score a setup and are shown on screen, but are never written: not on the public files, and no
+/// plan file is left behind by a backup that chose its setup inline.
+fn assert_no_places(work: &std::path::Path, dir: &std::path::Path) {
+    for file in ["record.hex", "recovery-sheet.txt"] {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap();
+        for place in PLACES {
+            assert!(
+                !text.contains(place),
+                "{file} names the place {place}:\n{text}"
+            );
+        }
+    }
+    assert!(
+        !work.join("setup.txt").exists(),
+        "a backup saved a setup file"
+    );
+}
+
+const PLACES: [&str; 3] = ["home", "office", "parents"];
 
 /// A fake `op`: `item create ... -` keeps the template's value under its title, `read ... <ref>` returns
 /// it. Every argv is logged, so the test can prove the share never travels on a command line. It refuses
@@ -383,15 +431,434 @@ fn backup_with_1password_then_verify_only_restore() {
     let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();
     assert!(
         sheet.contains(&format!(
-            "1password:        share 2 {reference} account my.1password.com"
+            "share 2:  1password    \"1Password\"  {reference} account my.1password.com"
         )),
         "{sheet}"
     );
     assert!(
-        sheet.contains("1Password item (Touch ID)")
-            && !sheet.contains("credential:")
-            && !sheet.contains("--key"),
+        !sheet.contains("credential") && !sheet.contains("--key"),
         "{sheet}"
     );
+    assert_no_places(&work, &dir);
     std::fs::remove_dir_all(&work).unwrap();
+}
+
+/// Preset 3 (2 of 4) as `vault plan` saves it: no places.
+const PLAN3: &str = "epn setup v1\nk 2\nshare 1 passphrase \"passphrase\"\nshare 2 yubikey \"YubiKey A\"\nshare 3 yubikey \"YubiKey B\"\nshare 4 paper \"paper\"\n";
+
+const SCRIPT_PLAN: &str = r#"
+spawn $env(VAULT) plan
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "How should this backup be split?" 2
+answer "Rename any of them?" n
+place passphrase 0 home
+place "YubiKey A" 0
+place "YubiKey B" 1 office
+place paper 2 parents
+expect "Loss    ✓ strong"
+expect "one break-in at home opens it: passphrase + YubiKey A"
+expect "All 6 combinations that open it"
+expect "type yes"; send "yes\r"
+expect -re {Saved (\S+)}
+expect "Where things are"
+expect -re {YubiKey B +office}
+expect "clear the screen"; send "\r"
+expect eof
+"#;
+
+#[test]
+fn plan_scores_and_saves_without_places() {
+    let Some((work, transcript)) = run_script("plan", SCRIPT_PLAN, &[], &[]) else {
+        return;
+    };
+    let saved = std::fs::read_to_string(work.join("setup.txt")).unwrap();
+    assert_eq!(saved, PLAN3);
+    for place in PLACES {
+        assert!(!saved.contains(place), "setup.txt names {place}");
+    }
+    // The private list is on screen, label by label.
+    assert!(transcript.contains("passphrase  home"), "{transcript}");
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
+/// Fake YubiKeys for several keys. `$WORK/key` names the key plugged in (A or B), `$WORK/two` means a
+/// second key is plugged in too, and `$WORK/creds-<key>` lists the credentials each key holds.
+/// `fido2-token -L -k` fails on a key with no credential for the rp id, as a real key may.
+const KEYS_TOKEN: &str = r#"if [ "$2" = "-k" ]; then
+  f="$WORK/creds-$(cat "$WORK/key")"
+  [ -f "$f" ] || exit 1
+  i=0; while read -r id; do printf '%02d: %s backup AQID es256 uvopt\n' "$i" "$id"; i=$((i+1)); done < "$f"
+else
+  echo '/dev/fake: vendor=0x1050, product=0x0407 (fake)'
+  [ -f "$WORK/two" ] && echo '/dev/fake2: vendor=0x1050, product=0x0407 (fake)'
+fi
+exit 0"#;
+/// A new credential `key-<key>-<counter>` (base64) on the key plugged in.
+const KEYS_CRED: &str = r#"read h; read rp; read user; read uid
+key=$(cat "$WORK/key"); f="$WORK/creds-$key"
+n=0; [ -f "$f" ] && n=$(wc -l < "$f")
+id=$(printf 'key-%s-%s' "$key" $((n + 1)) | base64)
+echo "$id" >> "$f"
+printf '%s\n' "$h" "$rp" packed AQID "$id" AQID"#;
+/// The secret is SHA-256 of the credential id, so two credentials give two secrets; a credential that is
+/// not on the key plugged in fails.
+const KEYS_ASSERT: &str = r#"read h; read rp; read id; read salt
+grep -qxF "$id" "$WORK/creds-$(cat "$WORK/key")" 2>/dev/null || exit 1
+s=$(printf %s "$id" | openssl dgst -sha256 -binary | base64)
+printf '%s\n' "$h" "$rp" AQID AQID "$s""#;
+
+/// `vault backup setup.txt` with two YubiKeys: a missed swap (key A still plugged in) and both keys plugged
+/// in are each refused and retried, then a verify-only restore opens the record with the two keys alone.
+const SCRIPT_TWO_KEYS: &str = r#"
+# A setup file is untrusted input: a bad one is refused before any folder is made.
+set f [open "$env(WORK)/bad.txt" w]; puts $f "epn setup v2"; close $f
+spawn $env(VAULT) --allow-unsafe-host backup bad.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+expect "the first line must be"
+expect eof
+if {[llength [glob -nocomplain backup-*]] > 0} { fail "a folder was made for a refused setup file" }
+
+set f [open "$env(WORK)/setup.txt" w]; puts -nonewline $f $env(PLAN); close $f
+# --device names one key: refused for two YubiKeys, before any folder is made.
+spawn $env(VAULT) --allow-unsafe-host backup --device /dev/fake setup.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+# From a file the setup cannot be changed here, and only Enter accepts it: "no" asks again.
+expect "or type back to stop (change it with `vault plan`): "; send "no\r"
+expect "Press Enter, or type back."
+expect "Press Enter to use this setup"; send "\r"
+expect "this setup has 2 YubiKeys: run it without --device"
+expect eof
+if {[llength [glob -nocomplain backup-*]] > 0} { fail "a folder was made for a refused --device" }
+
+plug A
+spawn $env(VAULT) --allow-unsafe-host backup setup.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+expect "places were checked in vault plan"
+expect "All 6 combinations that open it"
+expect "Press Enter to use this setup"; send "\r"
+expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
+expect "offline and ready."; send "\r"
+# A pasted id that is not on key A: the first key is not listed (key A holds no credential yet, so the
+# fake listing would fail), the secret step fails and says the id is not on the key.
+expect "Plug in only YubiKey A, then press Enter."; send "\r"
+expect "make a new one: "; send "Zm9v\r"
+expect "this credential id is not on the plugged-in key"
+expect "Plug in only YubiKey A, then press Enter."; send "\r"
+expect "make a new one: "; send "\r"
+expect -re {credential id: (\S+)}
+
+# The swap to key B is missed: the credential is made on key A, whose listing then shows share 2's id.
+expect "Plug in only YubiKey B, then press Enter."; send "\r"
+expect "make a new one: "; send "\r"
+expect "this is the same key as YubiKey A; plug in YubiKey B"
+# Key B plugged in, but key A left in too: told to unplug it, not the raw --device error.
+expect "Plug in only YubiKey B, then press Enter."
+plug B; close [open "$env(WORK)/two" w]
+send "\r"
+expect "make a new one: "; send "\r"
+expect "unplug the other"
+expect "Plug in only YubiKey B, then press Enter."
+file delete "$env(WORK)/two"
+send "\r"
+expect "make a new one: "; send "\r"
+expect -re {credential id: (\S+)}
+
+expect "Type your seed words"; secret $env(SEED)
+expect "Type them again"; secret $env(SEED)
+expect -re {Seed fingerprint: ([0-9a-f]{8})} { set fp $expect_out(1,string) }
+expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){12})} { set pass [join [words_of $expect_out(1,string)] " "] }
+expect "once it is written down"; send "\r"
+expect "passphrase: "; send "$pass\r"
+expect "Self-check passed: every combination of 2 opens the record."
+expect "Saved two PUBLIC files"
+expect -re {paper share \(this is share 4\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set shared [words_of $expect_out(1,string)] }
+expect "type all 24 words back"; send "\r"
+type_words $shared
+expect "7/7 Backup made"
+expect eof
+
+# Verify only with the two keys, one at a time: no passphrase, no paper.
+spawn $env(VAULT) --allow-unsafe-host restore
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "What should this run do?" 0
+expect "record.hex: "; send "$dir/record.hex\r"
+answer "share 1: passphrase" n
+answer "share 2: YubiKey A" y
+answer "share 3: YubiKey B" y
+answer "share 4: paper" n
+# Both keys left plugged in: told to unplug one and asked again, not sent to --device.
+expect "Plug in only the YubiKey that is share 2"; plug A; close [open "$env(WORK)/two" w]; send "\r"
+expect "More than one key is plugged in"
+expect "Plug in only the YubiKey that is share 2"; file delete "$env(WORK)/two"; send "\r"
+expect "Plug in only the YubiKey that is share 3"; plug B; send "\r"
+expect -re {Seed fingerprint: ([0-9a-f]{8})} {
+    if {$expect_out(1,string) ne $fp} { fail "verify-only fingerprint $expect_out(1,string) is not $fp" }
+}
+expect eof
+puts "\nDIR=$dir FP=$fp"
+"#;
+
+#[test]
+fn backup_two_keys_from_plan() {
+    let tools = [
+        ("fido2-token", KEYS_TOKEN),
+        ("fido2-cred", KEYS_CRED),
+        ("fido2-assert", KEYS_ASSERT),
+    ];
+    let Some((work, transcript)) = run_script(
+        "two-keys",
+        SCRIPT_TWO_KEYS,
+        &tools,
+        &[("SEED", SEED), ("PLAN", PLAN3)],
+    ) else {
+        return;
+    };
+    let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(SEED).unwrap());
+    assert!(transcript.contains(&format!("FP={fp}")), "{transcript}");
+    assert!(!transcript.contains("sausage"), "seed shown");
+    // With several keys plugged in, backup and restore say to unplug one, never to use --device.
+    assert!(
+        !transcript.contains("pick one with --device"),
+        "{transcript}"
+    );
+    let dir = work.join(
+        transcript
+            .rsplit_once("DIR=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap(),
+    );
+    let record =
+        epn_core::unhex(&std::fs::read_to_string(dir.join("record.hex")).unwrap()).unwrap();
+    let h = epn_core::record::parse_record(&record).unwrap();
+    use epn_core::record::Kind::*;
+    assert_eq!(
+        (h.k, h.kinds.clone()),
+        (2, vec![Passphrase, Hardware, Hardware, Paper])
+    );
+    // Share 2 is key A's first credential, share 3 key B's (key A's second, made by the missed swap, is unused).
+    let first = |key: &str| {
+        std::fs::read_to_string(work.join(format!("creds-{key}")))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let (a, b) = (first("A"), first("B"));
+    assert_ne!(a, b);
+    let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();
+    for want in [
+        format!("\"YubiKey A\"  credential {a}   (rpId localhost)"),
+        format!("\"YubiKey B\"  credential {b}   (rpId localhost)"),
+        format!("--key 2={a}@<path> --key 3={b}@<path>"),
+    ] {
+        assert!(sheet.contains(&want), "sheet lacks {want:?}:\n{sheet}");
+    }
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
+/// A custom setup with two 1Password shares in one account and a paper share (no passphrase: no Argon2):
+/// scored weak (one account breach opens it) and taken with `yes`; `vault op-store` asks which share to
+/// store and stores only that one, under its own share number.
+const SCRIPT_OP_PICK: &str = r#"
+spawn $env(VAULT) --allow-unsafe-host backup
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "How should this backup be split?" 4
+pick "Add share 1" 3
+pick "Add share 2" 3
+pick "Add share 3" 2
+pick "Add share 4" 4
+pick "How many shares should it take" 0
+answer "Rename any of them?" n
+foreach label {A B} {
+    expect "1Password $label\" (sign-in address or email, e.g. my.1password.com): "; send "my.1password.com\r"
+    expect "lists them): "; send "Personal\r"
+}
+place "1Password A" 0 home
+place "1Password B" 1 office
+place paper 2 parents
+# Both 1Password shares are in one account: one breach opens it, so the setup is weak whatever the places.
+expect "Theft   ⚠ weak"
+expect "one breach of the 1Password account my.1password.com opens it: 1Password A + 1Password B"
+expect "type yes"; send "yes\r"
+expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
+expect "offline and ready."; send "\r"
+expect "Type your seed words"; secret $env(SEED)
+expect "Type them again"; secret $env(SEED)
+expect "Self-check passed: every combination of 2 opens the record."
+foreach x {1 2} {
+    expect -re "share $x for 1Password \\(TEMPORARY paper\\):\r\n((?: +\[0-9\]+\\. \[a-z\]+\r\n){24})" { set share($x) [words_of $expect_out(1,string)] }
+    expect "type all 24 words back"; send "\r"
+    type_words $share($x)
+}
+expect -re {paper share \(this is share 3\):\r\n((?: +[0-9]+\. [a-z]+\r\n){24})} { set share(3) [words_of $expect_out(1,string)] }
+expect "type all 24 words back"; send "\r"
+type_words $share(3)
+expect "Backup made"
+expect eof
+
+spawn $env(VAULT) op-store $dir/recovery-sheet.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "Which 1Password share?" 1
+type_words $share(2)
+expect "Again"
+type_words $share(2)
+answer "NO item" y
+expect "Share 2 is in 1Password as"
+expect eof
+puts "\nDIR=$dir"
+"#;
+
+#[test]
+fn op_store_picks_share() {
+    let Some((work, transcript)) = run_script(
+        "op-pick",
+        SCRIPT_OP_PICK,
+        &[("op", FAKE_OP)],
+        &[("SEED", SEED)],
+    ) else {
+        return;
+    };
+    let dir = work.join(
+        transcript
+            .rsplit_once("DIR=")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap(),
+    );
+    let record =
+        epn_core::unhex(&std::fs::read_to_string(dir.join("record.hex")).unwrap()).unwrap();
+    let id = epn_core::record_id(&record);
+    let stored = std::fs::read_to_string(work.join(format!("op-epn-share-2-{id}"))).unwrap();
+    assert!(epn_core::bip39::share_from_words(&stored).is_ok());
+    assert!(!work.join(format!("op-epn-share-1-{id}")).exists());
+    let argv = std::fs::read_to_string(work.join("op-argv.log")).unwrap();
+    assert!(
+        argv.contains(&format!("op://Personal/epn-share-2-{id}/password")),
+        "{argv}"
+    );
+    assert!(!argv.contains("epn-share-1-"), "{argv}");
+    assert_eq!(argv.matches("item create").count(), 1, "{argv}");
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
+// vectors.json entry 1: 3 of 5 = passphrase, YubiKey, YubiKey, paper, paper. The tests below hold shares
+// 2, 3 and 4 (or 2, 4 and 5), so no Argon2 runs.
+const V1_RECORD: &str = "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf03050102020303375e1076118f6220d163af412c125935ed642cb3db64a25ff41681b626ad677f9a9e62092c14ecc6ec307a2ed3576671fdeb150a5ef9885730a6b68b18294ac4e6b6e116875adbc39b8fa68c5677086dc3fdb2f87188f8203083667d1b89400ca5acb3bac1c8cfd6dde4ebf20f04edfdadee4ec815d33e80eba11490ddde601c68f983a0fd2b15d61f884fb4046a0556b5f9b4c8e3926a9667c57850e8";
+const V1_MNEMONIC: &str = "arctic live gadget display excess mandate sniff autumn people disorder affair hole retreat fancy close tip deer village tuition orbit cannon owner maid spare";
+const V1_WORDS4: &str = "flight clock injury host plastic slide across memory patrol raven endless custom leisure caught start crater zero muffin inquiry canal donkey version decide kitchen";
+const V1_WORDS5: &str = "juice clerk lab quit pool room lizard moment library ramp faculty wagon keen crucial feature custom tent normal erupt throw drip tissue reunion grunt";
+
+/// A fake `fido2-assert` that answers with entry 1's share-2 secret for credential `Zm9v` and its share-3
+/// secret for `YmFy` (32 bytes 0x52.. and 0x53.., base64), echoing the hash and rp id as libfido2 does.
+const V1_ASSERT: &str = r#"read h; read rp; read id; read salt
+case "$id" in
+  Zm9v) s=UlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHE= ;;
+  YmFy) s=U1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXI= ;;
+  *) exit 1 ;;
+esac
+printf '%s\n' "$h" "$rp" AQID AQID "$s""#;
+
+/// Runs `script` against entry 1's record, with `sheet` as the recovery-sheet.txt beside record.hex.
+fn restore_v1(name: &str, sheet: &str, script: &str) {
+    let fido2_token = "echo '/dev/fake: vendor=0x1050, product=0x0407 (Yubico YubiKey)'";
+    let tools = [("fido2-assert", V1_ASSERT), ("fido2-token", fido2_token)];
+    let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(V1_MNEMONIC).unwrap());
+    let script = format!(
+        r#"
+foreach {{file var}} {{record.hex RECORD recovery-sheet.txt SHEET}} {{
+    set f [open "$env(WORK)/$file" w]; puts -nonewline $f $env($var); close $f
+}}
+{script}"#
+    );
+    let env = [
+        ("RECORD", V1_RECORD),
+        ("SHEET", sheet),
+        ("FP", fp.as_str()),
+        ("WORDS4", V1_WORDS4),
+        ("WORDS5", V1_WORDS5),
+    ];
+    if let Some((work, _)) = run_script(name, &script, &tools, &env) {
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+}
+
+/// Verify-only restore start: the mode menu, then the record path.
+const V1_START: &str = r#"
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "What should this run do?" 0
+expect "record.hex: "; send "$env(WORK)/record.hex\r"
+"#;
+
+const V1_END: &str = r#"
+expect -re {Seed fingerprint: ([0-9a-f]{8})} {
+    if {$expect_out(1,string) ne $env(FP)} { fail "fingerprint $expect_out(1,string) is not $env(FP)" }
+}
+expect eof
+"#;
+
+/// Two YubiKeys named on a new-format sheet (the lines `sheet::render` writes): the restore takes each
+/// credential from its `share N:` line, asks for no credential id, and has the keys plugged in one at a time.
+#[test]
+fn restore_two_keys_from_new_sheet() {
+    let sheet = format!(
+        "Recovery sheet.\n\nrecord:           0x{V1_RECORD}\n\n\
+         share 1:  passphrase   \"passphrase\"\n\
+         share 2:  yubikey      \"YubiKey A\"  credential Zm9v   (rpId localhost)\n\
+         share 3:  yubikey      \"YubiKey B\"  credential YmFy   (rpId localhost)\n\
+         share 4:  paper        \"paper A\"\n\
+         share 5:  paper        \"paper B\"\n"
+    );
+    let script = format!(
+        r#"
+spawn $env(VAULT) --allow-unsafe-host restore
+{V1_START}
+answer "share 1: passphrase" n
+answer "share 2: YubiKey A (YubiKey and its PIN)" y
+answer "share 3: YubiKey B (YubiKey and its PIN)" y
+answer "share 4: paper A (paper share (24 words))" y
+answer "share 5: paper B" n
+foreach {{x label}} {{2 A 3 B}} {{
+    expect {{
+        -ex "Credential id of the YubiKey" {{ fail "asked for a credential the sheet has" }}
+        -ex "Plug in only the YubiKey that is share $x (\"YubiKey $label\"), then press Enter." {{ send "\r" }}
+    }}
+    expect "Enter the PIN"
+}}
+type_words $env(WORDS4)
+{V1_END}"#
+    );
+    restore_v1("new-sheet", &sheet, &script);
+}
+
+/// Every backup made before setups were flexible must still restore: its sheet has one `credential:` line.
+#[test]
+fn restore_from_old_sheet_finds_credential() {
+    let sheet = format!(
+        "record:           0x{V1_RECORD}\n\
+         credential:       Zm9v   (YubiKey, share 2, rpId localhost)\n"
+    );
+    let script = format!(
+        r#"
+spawn $env(VAULT) --allow-unsafe-host restore --device /dev/fake
+{V1_START}
+answer "share 1: passphrase" n
+answer "share 2: YubiKey and its PIN" y
+answer "share 3: YubiKey and its PIN" n
+answer "share 4: paper share (24 words)" y
+answer "share 5: paper share (24 words)" y
+expect {{
+    -ex "Credential id of the YubiKey" {{ fail "asked for a credential the sheet has" }}
+    -ex "Enter the PIN"
+}}
+type_words $env(WORDS4)
+type_words $env(WORDS5)
+{V1_END}"#
+    );
+    restore_v1("old-sheet", &sheet, &script);
 }
