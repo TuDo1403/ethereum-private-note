@@ -1,0 +1,37 @@
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust-version: ["stable", "beta", "nightly"]
+
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install ${{ matrix.rust-version }}
+      - run: cargo +${{ matrix.rust-version }} test --all
+      - run: cargo +nightly test --all --features nightly
+        if: matrix.rust-version == 'nightly'
+
+  msrv-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install 1.61 stable
+      - run: CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +stable update
+      - run: cargo +1.61 check --all
+
+  ui-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: RUSTFLAGS='--cfg run_ui_tests' cargo +stable test ui
+
+  test-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: cargo fmt --check --all

@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "recover", "vault"]
+members = ["core", "recover", "vault", "publish"]
 resolver = "3"
 
 # Every dependency is pinned exactly and vendored in ./vendor (see .cargo/config.toml), so this builds

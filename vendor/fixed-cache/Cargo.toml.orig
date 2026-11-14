@@ -1,0 +1,30 @@
+[package]
+name = "fixed-cache"
+version = "0.1.11"
+edition = "2024"
+description = "A minimalistic, lock-free, fixed-size cache"
+rust-version = "1.88" # MSRV
+authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DaniPopes/fixed-cache"
+keywords = ["fixed", "cache", "hash", "concurrent", "lock-free"]
+categories = ["caching", "concurrency", "data-structures"]
+
+[dependencies]
+equivalent = { version = "1", default-features = false }
+
+rapidhash = { version = "4", default-features = false, optional = true }
+typeid = { version = "1", default-features = false, optional = true }
+
+[dev-dependencies]
+rapidhash = { version = "4", default-features = false }
+
+[features]
+default = ["std"]
+
+std = ["alloc", "rapidhash?/std"]
+alloc = []
+
+rapidhash = ["dep:rapidhash"]
+nightly = ["rapidhash?/nightly"]
+stats = ["alloc", "dep:typeid"]

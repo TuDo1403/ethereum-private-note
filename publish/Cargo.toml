@@ -1,0 +1,14 @@
+[package]
+name = "publish"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+
+# ONLINE half of the backup: publishes the public record.hex on chain. Handles no secret except a
+# throwaway gas key that lives in memory only. Deliberately independent of backup-core.
+[dependencies]
+# No default features: they pull rustls -> aws-lc-sys (a C build) for https. native-tls uses the OS TLS
+# (Security.framework on macOS; system OpenSSL on Linux). "essentials" = HTTP provider, local signer,
+# sol! contract bindings, rpc types.
+alloy = { version = "=2.5.0", default-features = false, features = ["essentials", "std", "reqwest", "reqwest-native-tls"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time"] }

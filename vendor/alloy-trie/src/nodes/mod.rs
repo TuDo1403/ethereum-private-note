@@ -1,0 +1,458 @@
+//! Various branch nodes produced by the hash builder.
+
+use crate::TrieMask;
+use alloy_primitives::B256;
+use alloy_rlp::{Decodable, EMPTY_STRING_CODE, Encodable, Header};
+use core::ops::Range;
+use nybbles::Nibbles;
+use smallvec::SmallVec;
+
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+
+mod branch;
+pub use branch::{BranchNode, BranchNodeCompact, BranchNodeRef};
+
+mod extension;
+pub use extension::{ExtensionNode, ExtensionNodeRef};
+
+mod leaf;
+pub use leaf::{LeafNode, LeafNodeRef};
+
+mod rlp;
+pub use rlp::RlpNode;
+
+/// The range of valid child indexes.
+pub const CHILD_INDEX_RANGE: Range<u8> = 0..16;
+
+/// Enum representing an MPT trie node.
+#[derive(PartialEq, Eq, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TrieNode {
+    /// Variant representing empty root node.
+    EmptyRoot,
+    /// Variant representing a [BranchNode].
+    Branch(BranchNode),
+    /// Variant representing a [ExtensionNode].
+    Extension(ExtensionNode),
+    /// Variant representing a [LeafNode].
+    Leaf(LeafNode),
+}
+
+impl Encodable for TrieNode {
+    #[inline]
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        match self {
+            Self::EmptyRoot => {
+                out.put_u8(EMPTY_STRING_CODE);
+            }
+            Self::Branch(branch) => branch.encode(out),
+            Self::Extension(extension) => extension.encode(out),
+            Self::Leaf(leaf) => leaf.encode(out),
+        }
+    }
+
+    #[inline]
+    fn length(&self) -> usize {
+        match self {
+            Self::EmptyRoot => 1,
+            Self::Branch(branch) => branch.length(),
+            Self::Extension(extension) => extension.length(),
+            Self::Leaf(leaf) => leaf.length(),
+        }
+    }
+}
+
+impl Decodable for TrieNode {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let Header { list, payload_length } = Header::decode(buf)?;
+        // `Header::decode` checks that the buffer holds `payload_length` bytes.
+        let (mut payload, rest) = buf.split_at(payload_length);
+        *buf = rest;
+
+        if !list {
+            return if payload.is_empty() {
+                Ok(Self::EmptyRoot)
+            } else {
+                Err(alloy_rlp::Error::UnexpectedString)
+            };
+        }
+
+        // A valid number of trie node items is either 17 (branch node)
+        // or 2 (extension or leaf node).
+        let mut items = [&[][..]; 17];
+        let mut len = 0;
+        while !payload.is_empty() {
+            let item_start = payload;
+            let Header { payload_length, .. } = Header::decode(&mut payload)?;
+            payload = &payload[payload_length..];
+
+            if len == items.len() {
+                return Err(alloy_rlp::Error::Custom("invalid number of items in the list"));
+            }
+            items[len] = &item_start[..item_start.len() - payload.len()];
+            len += 1;
+        }
+
+        match len {
+            17 => {
+                let (children, value) = items.split_at(16);
+                let child_count =
+                    children.iter().filter(|item| **item != [EMPTY_STRING_CODE]).count();
+
+                let mut stack = Vec::with_capacity(child_count);
+                let mut state_mask = TrieMask::default();
+                for (idx, item) in children.iter().enumerate() {
+                    if *item != [EMPTY_STRING_CODE] {
+                        stack.push(RlpNode::from_raw_rlp(item)?);
+                        state_mask.set_bit(idx as u8);
+                    }
+                }
+                if value[0] != [EMPTY_STRING_CODE] {
+                    return Err(alloy_rlp::Error::Custom("branch node values are not supported"));
+                }
+                Ok(Self::Branch(BranchNode::new(stack, state_mask)))
+            }
+            2 => {
+                let mut key = items[0];
+
+                let encoded_key = Header::decode_bytes(&mut key, false)?;
+                if encoded_key.is_empty() {
+                    return Err(alloy_rlp::Error::Custom("trie node key empty"));
+                }
+
+                // extract the high order part of the nibble to then pick the odd nibble out
+                let key_flag = encoded_key[0] & 0xf0;
+                // Retrieve first byte. If it's [Some], then the nibbles are odd.
+                let first = match key_flag {
+                    ExtensionNode::ODD_FLAG | LeafNode::ODD_FLAG => Some(encoded_key[0] & 0x0f),
+                    ExtensionNode::EVEN_FLAG | LeafNode::EVEN_FLAG => None,
+                    _ => return Err(alloy_rlp::Error::Custom("node is not extension or leaf")),
+                };
+
+                let key = unpack_path_to_nibbles(first, &encoded_key[1..])?;
+                let node = if key_flag == LeafNode::EVEN_FLAG || key_flag == LeafNode::ODD_FLAG {
+                    let mut value = items[1];
+                    let value = Header::decode_bytes(&mut value, false)?.to_vec();
+                    Self::Leaf(LeafNode::new(key, value))
+                } else {
+                    // We don't decode value because it is expected to be RLP encoded.
+                    Self::Extension(ExtensionNode::new(key, RlpNode::from_raw_rlp(items[1])?))
+                };
+                Ok(node)
+            }
+            _ => Err(alloy_rlp::Error::Custom("invalid number of items in the list")),
+        }
+    }
+}
+
+impl TrieNode {
+    /// RLP-encodes the node and returns either `rlp(node)` or `rlp(keccak(rlp(node)))`.
+    #[inline]
+    pub fn rlp(&self, rlp: &mut Vec<u8>) -> RlpNode {
+        self.encode(rlp);
+        RlpNode::from_rlp(rlp)
+    }
+}
+
+/// Given an RLP-encoded node, returns it either as `rlp(node)` or `rlp(keccak(rlp(node)))`.
+#[inline]
+#[deprecated = "use `RlpNode::from_rlp` instead"]
+pub fn rlp_node(rlp: &[u8]) -> RlpNode {
+    RlpNode::from_rlp(rlp)
+}
+
+/// Optimization for quick RLP-encoding of a 32-byte word.
+#[inline]
+#[deprecated = "use `RlpNode::word_rlp` instead"]
+pub const fn word_rlp(word: &B256) -> RlpNode {
+    RlpNode::word_rlp(word)
+}
+
+/// Unpack node path to nibbles.
+///
+/// NOTE: The first nibble should be less than or equal to `0xf` if provided.
+/// If first nibble is greater than `0xf`, the method will not panic, but initialize invalid nibbles
+/// instead.
+///
+/// ## Arguments
+///
+/// `first` - first nibble of the path if it is odd
+/// `rest` - rest of the nibbles packed
+///
+/// Returns an error if the path is longer than 64 nibbles.
+#[inline]
+pub(crate) fn unpack_path_to_nibbles(first: Option<u8>, rest: &[u8]) -> alloy_rlp::Result<Nibbles> {
+    if rest.len() > 32 - first.is_some() as usize {
+        return Err(alloy_rlp::Error::Custom("trie node key too long"));
+    }
+    let rest = Nibbles::unpack(rest);
+    let Some(first) = first else { return Ok(rest) };
+    debug_assert!(first <= 0xf);
+    // TODO: optimize
+    Ok(Nibbles::from_nibbles_unchecked([first]).join(&rest))
+}
+
+/// Encodes a given path leaf as a compact array of bytes.
+///
+/// In resulted array, each byte represents two "nibbles" (half-bytes or 4 bits) of the original hex
+/// data, along with additional information about the leaf itself.
+///
+/// The method takes the following input:
+/// `is_leaf`: A boolean value indicating whether the current node is a leaf node or not.
+///
+/// The first byte of the encoded vector is set based on the `is_leaf` flag and the parity of
+/// the hex data length (even or odd number of nibbles).
+///  - If the node is an extension with even length, the header byte is `0x00`.
+///  - If the node is an extension with odd length, the header byte is `0x10 + <first nibble>`.
+///  - If the node is a leaf with even length, the header byte is `0x20`.
+///  - If the node is a leaf with odd length, the header byte is `0x30 + <first nibble>`.
+///
+/// If there is an odd number of nibbles, store the first nibble in the lower 4 bits of the
+/// first byte of encoded.
+///
+/// # Returns
+///
+/// A vector containing the compact byte representation of the nibble sequence, including the
+/// header byte.
+///
+/// This vector's length is `self.len() / 2 + 1`. For stack-allocated nibbles, this is at most
+/// 33 bytes, so 36 was chosen as the stack capacity to round up to the next usize-aligned
+/// size.
+///
+/// # Examples
+///
+/// ```
+/// use alloy_trie::nodes::encode_path_leaf;
+/// use nybbles::Nibbles;
+///
+/// // Extension node with an even path length:
+/// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D]);
+/// assert_eq!(encode_path_leaf(&nibbles, false)[..], [0x00, 0xAB, 0xCD]);
+///
+/// // Extension node with an odd path length:
+/// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C]);
+/// assert_eq!(encode_path_leaf(&nibbles, false)[..], [0x1A, 0xBC]);
+///
+/// // Leaf node with an even path length:
+/// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D]);
+/// assert_eq!(encode_path_leaf(&nibbles, true)[..], [0x20, 0xAB, 0xCD]);
+///
+/// // Leaf node with an odd path length:
+/// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C]);
+/// assert_eq!(encode_path_leaf(&nibbles, true)[..], [0x3A, 0xBC]);
+/// ```
+#[inline]
+pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> {
+    let mut nibbles = *nibbles;
+    let len = nibbles.len();
+    let (even_flag, odd_flag) = if is_leaf {
+        (LeafNode::EVEN_FLAG, LeafNode::ODD_FLAG)
+    } else {
+        (ExtensionNode::EVEN_FLAG, ExtensionNode::ODD_FLAG)
+    };
+    // `Nibbles` stores the nibbles left-aligned in a `U256`, so the packed path is its big-endian
+    // bytes. Only the bytes inside the path are read.
+    let limbs = *nibbles.as_mut_uint_unchecked().as_limbs();
+    let mut buf = [0u8; 36];
+    if len % 2 != 0 {
+        // Shift right by one nibble, so the first nibble lands in the low half of the flag byte.
+        let shifted = [
+            limbs[3] >> 4,
+            limbs[2] >> 4 | limbs[3] << 60,
+            limbs[1] >> 4 | limbs[2] << 60,
+            limbs[0] >> 4 | limbs[1] << 60,
+        ];
+        for (chunk, limb) in buf.chunks_exact_mut(8).zip(shifted) {
+            chunk.copy_from_slice(&limb.to_be_bytes());
+        }
+        buf[0] |= odd_flag;
+    } else {
+        for (chunk, limb) in buf[1..33].chunks_exact_mut(8).zip(limbs.iter().rev()) {
+            chunk.copy_from_slice(&limb.to_be_bytes());
+        }
+        buf[0] = even_flag;
+    }
+    SmallVec::from_buf_and_len(buf, len / 2 + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::hex;
+
+    #[test]
+    fn rlp_empty_root_node() {
+        let empty_root = TrieNode::EmptyRoot;
+        let rlp = empty_root.rlp(&mut vec![]);
+        assert_eq!(rlp[..], hex!("80"));
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), empty_root);
+    }
+
+    #[test]
+    fn decode_rejects_invalid_item_counts_and_branch_values() {
+        let list = |items: usize, value: &[u8]| {
+            let mut payload = vec![EMPTY_STRING_CODE; items - 1];
+            payload.extend_from_slice(value);
+            let mut rlp = vec![0xc0 + payload.len() as u8];
+            rlp.extend(payload);
+            rlp
+        };
+
+        assert!(matches!(
+            TrieNode::decode(&mut &list(17, &[EMPTY_STRING_CODE])[..]),
+            Ok(TrieNode::Branch(branch)) if branch.stack.is_empty()
+        ));
+        assert_eq!(
+            TrieNode::decode(&mut &list(17, &[0x01])[..]),
+            Err(alloy_rlp::Error::Custom("branch node values are not supported"))
+        );
+        for items in [0, 1, 3, 16, 18, 20] {
+            let rlp = if items == 0 { vec![0xc0] } else { list(items, &[EMPTY_STRING_CODE]) };
+            assert_eq!(
+                TrieNode::decode(&mut &rlp[..]),
+                Err(alloy_rlp::Error::Custom("invalid number of items in the list")),
+                "{items} items"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_oversized_keys() {
+        // `flag` byte followed by `len` key bytes, as a leaf (value `0x01`) or an extension (hash
+        // child).
+        let node = |leaf: bool, flag: u8, len: usize| {
+            let mut key = vec![flag];
+            key.extend(vec![0xab; len]);
+            let mut payload = vec![];
+            key.as_slice().encode(&mut payload);
+            if leaf {
+                payload.push(0x01);
+            } else {
+                B256::ZERO.encode(&mut payload);
+            }
+            let mut rlp = vec![];
+            Header { list: true, payload_length: payload.len() }.encode(&mut rlp);
+            rlp.extend(payload);
+            rlp
+        };
+
+        let too_long = Err(alloy_rlp::Error::Custom("trie node key too long"));
+        // (leaf, flag, max key bytes after the flag): 64 nibbles when even, 63 when odd.
+        for (leaf, flag, max) in [
+            (true, LeafNode::EVEN_FLAG, 32),
+            (true, LeafNode::ODD_FLAG | 0x0c, 31),
+            (false, ExtensionNode::EVEN_FLAG, 32),
+            (false, ExtensionNode::ODD_FLAG | 0x0c, 31),
+        ] {
+            let ok = node(leaf, flag, max);
+            let over = node(leaf, flag, max + 1);
+
+            let decoded = TrieNode::decode(&mut &ok[..]).unwrap();
+            assert_eq!(alloy_rlp::encode(&decoded), ok);
+            assert_eq!(TrieNode::decode(&mut &over[..]).map(drop), too_long);
+
+            if leaf {
+                assert!(LeafNode::decode(&mut &ok[..]).is_ok());
+                assert_eq!(LeafNode::decode(&mut &over[..]).map(drop), too_long);
+            } else {
+                assert!(ExtensionNode::decode(&mut &ok[..]).is_ok());
+                assert_eq!(ExtensionNode::decode(&mut &over[..]).map(drop), too_long);
+            }
+        }
+    }
+
+    #[test]
+    fn rlp_zero_value_leaf_roundtrip() {
+        let leaf = TrieNode::Leaf(LeafNode::new(
+            Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+            alloy_rlp::encode(alloy_primitives::U256::ZERO),
+        ));
+        let rlp = leaf.rlp(&mut vec![]);
+        assert_eq!(rlp[..], hex!("c68320646f8180"));
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), leaf);
+    }
+
+    #[test]
+    fn rlp_trie_node_roundtrip() {
+        // leaf
+        let leaf = TrieNode::Leaf(LeafNode::new(
+            Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+            hex!("76657262").to_vec(),
+        ));
+        let rlp = leaf.rlp(&mut vec![]);
+        assert_eq!(rlp[..], hex!("c98320646f8476657262"));
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), leaf);
+
+        // extension
+        let mut child = vec![];
+        hex!("76657262").to_vec().as_slice().encode(&mut child);
+        let extension = TrieNode::Extension(ExtensionNode::new(
+            Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+            RlpNode::from_raw(&child).unwrap(),
+        ));
+        let rlp = extension.rlp(&mut vec![]);
+        assert_eq!(rlp[..], hex!("c98300646f8476657262"));
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), extension);
+
+        // branch
+        let branch = TrieNode::Branch(BranchNode::new(
+            core::iter::repeat_n(RlpNode::word_rlp(&B256::repeat_byte(23)), 16).collect(),
+            TrieMask::new(u16::MAX),
+        ));
+        let mut rlp = vec![];
+        let rlp_node = branch.rlp(&mut rlp);
+        assert_eq!(
+            rlp_node[..],
+            hex!("a0bed74980bbe29d9c4439c10e9c451e29b306fe74bcf9795ecf0ebbd92a220513")
+        );
+        assert_eq!(
+            rlp,
+            hex!(
+                "f90211a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a0171717171717171717171717171717171717171717171717171717171717171780"
+            )
+        );
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), branch);
+    }
+
+    #[test]
+    fn hashed_encode_path_regression() {
+        let nibbles = Nibbles::from_nibbles(hex!(
+            "05010406040a040203030f010805020b050c04070003070e0909070f010b0a0805020301070c0a0902040b0f000f0006040a04050f020b090701000a0a040b"
+        ));
+        let path = encode_path_leaf(&nibbles, true);
+        let expected = hex!("351464a4233f1852b5c47037e997f1ba852317ca924bf0f064a45f2b9710aa4b");
+        assert_eq!(path[..], expected);
+    }
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn encode_path_first_byte() {
+        use proptest::{collection::vec, prelude::*};
+
+        proptest::proptest!(|(input in vec(any::<u8>(), 0..32))| {
+            let input = Nibbles::unpack(&input);
+            prop_assert!(input.to_vec().iter().all(|&nibble| nibble <= 0xf));
+            let input_is_odd = input.len() % 2 == 1;
+
+            let compact_leaf = encode_path_leaf(&input, true);
+            let leaf_flag = compact_leaf[0];
+            // Check flag
+            assert_ne!(leaf_flag & LeafNode::EVEN_FLAG, 0);
+            assert_eq!(input_is_odd, (leaf_flag & ExtensionNode::ODD_FLAG) != 0);
+            if input_is_odd {
+                assert_eq!(leaf_flag & 0x0f, input.first().unwrap());
+            }
+
+            let compact_extension = encode_path_leaf(&input, false);
+            let extension_flag = compact_extension[0];
+            // Check first byte
+            assert_eq!(extension_flag & LeafNode::EVEN_FLAG, 0);
+            assert_eq!(input_is_odd, (extension_flag & ExtensionNode::ODD_FLAG) != 0);
+            if input_is_odd {
+                assert_eq!(extension_flag & 0x0f, input.first().unwrap());
+            }
+        });
+    }
+}
