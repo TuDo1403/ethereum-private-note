@@ -1,6 +1,7 @@
 //! `vault restore`: asks which factors you hold and walks through each, for any record the format allows.
 //! Secrets are read at hidden prompts; "verify only" prints the seed fingerprint and never the seed.
 
+use crate::onepassword;
 use crate::prompt::*;
 use epn_core::bip39::words_to_entropy;
 use epn_core::record::{Header, Kind, parse_record, restore};
@@ -8,33 +9,40 @@ use epn_core::{fido, seed_fingerprint, unhex};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-/// The record, from a pasted hex string or a record.hex file. A recovery-sheet.txt beside the file
-/// supplies the YubiKey credential id, so the user does not have to find it.
-fn read_record() -> Result<(Vec<u8>, Header, Option<String>), String> {
+/// What a recovery-sheet.txt beside record.hex tells the restore: the YubiKey credential id and the
+/// 1Password references of shares kept there, so the user does not have to find them.
+#[derive(Default)]
+struct SheetHints {
+    cred: Option<String>,
+    op_refs: Vec<(u8, String)>,
+}
+
+/// The record, from a pasted hex string or a record.hex file (with the hints of the sheet beside it).
+fn read_record() -> Result<(Vec<u8>, Header, SheetHints), String> {
     for _ in 0..TRIES {
         let input = ask("Paste the record (0x...) or the path to record.hex: ")?;
         let path = std::path::Path::new(&input);
-        let (text, cred) = if path.is_file() {
+        let (text, hints) = if path.is_file() {
             let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-            let cred = std::fs::read_to_string(path.with_file_name("recovery-sheet.txt")).ok().and_then(|s| {
-                s.lines().find_map(|l| l.strip_prefix("credential:")?.split_whitespace().next().map(str::to_string))
-            });
-            (text, cred)
+            let sheet = std::fs::read_to_string(path.with_file_name("recovery-sheet.txt")).unwrap_or_default();
+            let cred = sheet.lines().find_map(|l| l.strip_prefix("credential:")?.split_whitespace().next().map(str::to_string));
+            (text, SheetHints { cred, op_refs: onepassword::sheet_references(&sheet) })
         } else {
-            (input.clone(), None)
+            (input.clone(), SheetHints::default())
         };
         match unhex(&text).and_then(|r| parse_record(&r).map(|h| (r, h))) {
-            Ok((r, h)) => return Ok((r, h, cred)),
+            Ok((r, h)) => return Ok((r, h, hints)),
             Err(e) => println!("That is not a record: {e}"),
         }
     }
     Err("no valid record given".into())
 }
 
-fn label(kind: Kind) -> &'static str {
+fn label(kind: Kind, in_1password: bool) -> &'static str {
     match kind {
         Kind::Passphrase => "passphrase",
         Kind::Hardware => "YubiKey and its PIN",
+        Kind::Paper if in_1password => "1Password item (Touch ID)",
         Kind::Paper => "paper share (24 words)",
     }
 }
@@ -45,14 +53,16 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     println!("  1. restore: show the seed words (do this offline, nobody watching the screen)");
     println!("  2. verify only: check the factors and show the seed fingerprint, never the seed\n");
     let verify_only = choose_1_or_2()? == 2;
-    let (record, h, mut sheet_cred) = read_record()?;
+    let (record, h, hints) = read_record()?;
+    let mut sheet_cred = hints.cred;
+    let op_ref = |x: u8| hints.op_refs.iter().find(|r| r.0 == x).map(|r| r.1.as_str());
 
     let held: Vec<u8> = loop {
         println!("\nThis record needs any {} of its {} factors. Which do you have with you?", h.k, h.kinds.len());
         let mut held = Vec::new();
         for (i, &kind) in h.kinds.iter().enumerate() {
             let x = i as u8 + 1;
-            if yes(&format!("  share {x}: {}", label(kind)))? {
+            if yes(&format!("  share {x}: {}", label(kind, op_ref(x).is_some())))? {
                 held.push(x);
             }
         }
@@ -86,8 +96,11 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     for attempt in 1..=TRIES {
         for &x in &redo {
             println!();
-            let secret = match kind(x) {
-                Kind::Passphrase => ask_hidden("passphrase, exactly as written (hidden): ")?,
+            let secret = match (kind(x), op_ref(x)) {
+                (Kind::Passphrase, _) => ask_hidden("passphrase, exactly as written (hidden): ")?,
+                (_, Some(r)) if yes(&format!("Read share {x} from 1Password ({r}); it asks for Touch ID?"))? => {
+                    onepassword::read(r)?
+                }
                 _ => enter_paper_share(x)?,
             };
             typed.insert(x, secret);
@@ -123,7 +136,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
                 println!("Passphrase: lowercase, one space between words, exactly as written. Paper share: words in order.");
                 redo = Vec::new();
                 for &x in typed.keys() {
-                    if yes(&format!("Type share {x} ({}) again?", label(kind(x))))? {
+                    if yes(&format!("Enter share {x} ({}) again?", label(kind(x), op_ref(x).is_some())))? {
                         redo.push(x);
                     }
                 }

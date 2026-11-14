@@ -102,6 +102,11 @@ the offline machine you will use.
   unplugged for the whole session. It needs 2 GiB of free RAM (Argon2id uses 1 GiB).
 - **A YubiKey 5 (or any FIDO2 key with `hmac-secret`) with a FIDO2 PIN set.** Set the PIN first, for
   example with `ykman fido access change-pin`. Without a PIN the key cannot be used.
+  **Or 1Password with Touch ID** instead of the YubiKey: share 2 is then kept as a 1Password item and
+  read back with Touch ID. Install the `op` command and turn on *Settings > Developer > Integrate with
+  1Password CLI* in the 1Password app. This is a weaker factor than a YubiKey: the share syncs with
+  your 1Password account and is as safe as that account, not tied to one device. **Never keep the
+  passphrase or the paper share in that same account**, or one breach of it gives two factors.
 - **Paper and a pen** for the passphrase and the paper share. Steel plates if you want fire/water resistance.
 - **An online machine** for `publish` (later, no secrets involved).
 - **A wallet with a little ETH** on the chain you choose, to fund the throwaway publishing address.
@@ -113,7 +118,7 @@ The rule: **no single place holds two factors.** A suggested layout:
 | place | keeps |
 |-------|-------|
 | home safe | passphrase paper |
-| on you / your desk | YubiKey (its PIN in your head or your password manager, never on the key) |
+| on you / your desk | YubiKey (its PIN in your head or your password manager, never on the key), or share 2 in 1Password |
 | second location (bank box, trusted family) | paper share, labelled *"backup share 3, not a wallet"* |
 | anywhere, several copies | recovery sheet, `record.hex`, a printout of `SPEC.md` |
 
@@ -139,15 +144,20 @@ On the **offline** machine, with the YubiKey plugged in:
 the output folder `./backup-<timestamp>/` and checks that it can write there. Then it walks through six
 steps:
 
-1. **YubiKey.** Press Enter to create a new resident credential (PIN, then touch), or paste the
-   credential id of one made earlier by `vault`. The id is not secret; it goes on the recovery sheet.
+1. **Second factor.** Choose 1 for the YubiKey: press Enter to create a new resident credential (PIN,
+   then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it goes
+   on the recovery sheet. Or choose 2 for 1Password (Touch ID) and name the 1Password vault (Enter for
+   `Private`). After step 4, share 2 is stored there as the item `epn-share-2-<record id>` (the words go
+   to `op` through stdin, never the command line or a file) and read back once to check it; 1Password
+   asks for Touch ID. The sheet names the item's `op://` reference, and `vault restore` offers to read it
+   from 1Password instead of typing it.
 2. **Seed.** Type your 12–24 seed words (hidden), then type them again: both entries must give the same
    seed, because a typo that is another BIP39 word passes the checksum surprisingly often (1 in 16 for
    12 words). The **seed fingerprint** (8 hex digits, see `SPEC.md`) is shown; note it. Only the entropy
    is stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
 3. **Passphrase.** Seven words are generated and shown once. Write them down in lowercase, one space
    between words. The screen is cleared and you must type them back.
-4. **Build, check and save.** PIN and touch again, then Argon2id (1 GiB, takes a while). Every pair of
+4. **Build, check and save.** PIN and touch again (YubiKey only), then Argon2id (1 GiB, takes a while). Every pair of
    factors is tried against the new record; if any pair fails, nothing is saved. Then the two public
    files, `record.hex` and `recovery-sheet.txt`, are written (and synced to disk) **before** the paper
    share is shown, so a crash later cannot leave you with papers and no record. If writing fails, `vault`
@@ -158,7 +168,8 @@ steps:
 6. **Next steps** are printed: test the papers with a verify-only restore, publish the record, fill in
    the recovery sheet.
 
-The recovery sheet holds the record id, the record, the seed fingerprint, the credential id and blanks
+The recovery sheet holds the record id, the record, the seed fingerprint, the credential id (or the
+1Password reference) and blanks
 for the chain id and the record's address. Print it, together with `SPEC.md`, and keep a copy of it (or
 of `record.hex` and these locators) in the storage place of every factor paper too.
 

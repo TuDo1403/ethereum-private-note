@@ -8,6 +8,7 @@
 //! Nothing here is needed to restore: `recover` and SPEC.md stand alone.
 
 mod backup;
+mod onepassword;
 mod prompt;
 mod restore;
 
