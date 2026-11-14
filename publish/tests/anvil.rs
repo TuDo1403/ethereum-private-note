@@ -6,10 +6,13 @@ use alloy::{
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
 };
-use epn_publish::{FundRequest, Options, RECORD_LEN, publish as run};
-use std::sync::{Arc, Mutex};
+use epn_publish::{FundRequest, Options, V1_LEN, publish as run, record_id};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 // anvil's well-known, public dev account #0 (never holds real funds).
 const DEV_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -52,14 +55,35 @@ async fn set_code(url: &str, who: Address, code: &str) {
     p.raw_request::<_, ()>("anvil_setCode".into(), (who, code)).await.unwrap();
 }
 
+/// Turn anvil's automatic mining on or off; `mine` mines one block now.
+async fn automine(url: &str, on: bool) {
+    let p = ProviderBuilder::new().connect(url).await.unwrap();
+    p.raw_request::<_, ()>("evm_setAutomine".into(), (on,)).await.unwrap();
+}
+
+async fn mine(url: &str) {
+    let p = ProviderBuilder::new().connect(url).await.unwrap();
+    p.raw_request::<_, String>("evm_mine".into(), ()).await.unwrap();
+}
+
 fn opts<'a>(url: &'a str) -> Options<'a> {
     Options { rpc_url: url, verify_rpc_url: None, refund: REFUND, fund_timeout: Duration::from_secs(30), confirmations: 1, allow_high_fees: false }
 }
 
-async fn send_eth(url: &str, to: Address, wei: U256) {
+fn dev(url: &str) -> impl Provider {
     let signer: PrivateKeySigner = DEV_KEY.parse().unwrap();
-    let p = ProviderBuilder::new().wallet(EthereumWallet::from(signer)).connect(url).await.unwrap();
-    p.send_transaction(TransactionRequest::default().to(to).value(wei)).await.unwrap().get_receipt().await.unwrap();
+    ProviderBuilder::new().wallet(EthereumWallet::from(signer)).connect_http(url.parse().unwrap())
+}
+
+async fn send_eth(url: &str, to: Address, wei: U256) {
+    dev(url).send_transaction(TransactionRequest::default().to(to).value(wei)).await.unwrap().get_receipt().await.unwrap();
+}
+
+/// Fund `to` while automine is off: send, mine one block, wait for the receipt.
+async fn send_eth_and_mine(url: &str, to: Address, wei: U256) {
+    let pending = dev(url).send_transaction(TransactionRequest::default().to(to).value(wei)).await.unwrap();
+    mine(url).await;
+    pending.get_receipt().await.unwrap();
 }
 
 /// Run the flow, funding the throwaway sender from the dev account whenever asked (`pct` of the ask).
@@ -80,11 +104,25 @@ async fn run_funded(url: &str, record: &[u8]) -> Result<epn_publish::Outcome, St
 async fn spike_base_fee(url: &str, wei: u128) {
     let p = ProviderBuilder::new().connect(url).await.unwrap();
     p.raw_request::<_, ()>("anvil_setNextBlockBaseFeePerGas".into(), (U256::from(wei),)).await.unwrap();
-    p.raw_request::<_, String>("evm_mine".into(), ()).await.unwrap();
+    mine(url).await;
 }
 
+/// A valid v1 record (version 0x01, m = 1024 KiB, t = 3), distinct per seed.
 fn record(seed: u8) -> Vec<u8> {
-    (0..RECORD_LEN).map(|i| seed.wrapping_add(i as u8)).collect()
+    (0..V1_LEN).map(|i| [1, 0, 0, 4, 0, 3].get(i).copied().unwrap_or(seed.wrapping_add(i as u8))).collect()
+}
+
+/// The largest v2 record SPEC.md allows: 3-of-5, all five shares on chain (passphrase + 4 hardware).
+fn largest_v2_record() -> Vec<u8> {
+    let mut r = vec![0x02, 0, 0x10, 0, 0, 3];
+    r.resize(22, 0x5a); // salt
+    r.extend([3, 5, 1, 2, 2, 2, 2]);
+    r.resize(85 + 5 + 32 * 5, 0xc3);
+    r
+}
+
+fn eth(n: u64) -> U256 {
+    U256::from(n) * U256::from(10u64).pow(U256::from(16)) // n x 0.01 ETH
 }
 
 /// What a restore reads: the code at the address is `0x00 || record`.
@@ -102,10 +140,11 @@ async fn deploys_record_as_code_reads_back_and_sweeps() {
     let rec = record(1);
     let out = run_funded(&anvil.1, &rec).await.unwrap();
     assert_eq!(out.address, out.sender.create(0));
+    assert_eq!(out.record_id, record_id(&rec));
     assert!(out.swept > U256::ZERO);
     assert_eq!(p.get_balance(REFUND).await.unwrap(), out.swept);
     // Sender is drained to (almost) nothing: only the sweep's fee headroom may remain.
-    assert!(p.get_balance(out.sender).await.unwrap() < U256::from(10u64).pow(U256::from(16)));
+    assert!(p.get_balance(out.sender).await.unwrap() < eth(1));
     assert_eq!(stored(&p, out.address).await, rec);
 
     // Second run: new throwaway sender, new address; the first record is untouched.
@@ -116,15 +155,22 @@ async fn deploys_record_as_code_reads_back_and_sweeps() {
     assert_eq!(stored(&p, out.address).await, rec);
 }
 
-/// EIP-3541 rejects code that starts with 0xEF; the STOP prefix must make such a record deployable.
+/// The largest record (250 bytes, code 251 bytes) deploys within the estimated gas.
 #[tokio::test(flavor = "multi_thread")]
-async fn record_starting_with_0xef_deploys() {
+async fn largest_v2_record_deploys() {
     let Some(anvil) = start_anvil().await else { return };
-    let mut rec = record(1);
-    rec[0] = 0xef;
+    let rec = largest_v2_record();
+    assert_eq!(rec.len(), 250);
     let out = run_funded(&anvil.1, &rec).await.unwrap();
     let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
     assert_eq!(stored(&p, out.address).await, rec);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_record_is_refused_before_funding() {
+    let o = opts("http://127.0.0.1:1");
+    let err = run(&o, &[0u8; V1_LEN], |_: &FundRequest| panic!("must not ask for funds")).await.unwrap_err();
+    assert!(err.contains("version 0"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -149,6 +195,7 @@ async fn failure_after_funding_still_sweeps() {
     o.verify_rpc_url = Some(&b.1);
     let err = run_funded_opts(&o, &record(5), 100).await.unwrap_err();
     assert!(err.contains("read-back") && err.contains("swept"), "{err}");
+    assert!(!err.contains("Do not send"), "funds arrived, so this is not a pre-funding exit: {err}");
     let p = ProviderBuilder::new().connect(&a.1).await.unwrap();
     assert!(p.get_balance(REFUND).await.unwrap() > U256::ZERO, "leftover must reach the refund address");
 }
@@ -169,8 +216,69 @@ async fn funding_timeout_sweeps_partial_funds() {
     o.fund_timeout = Duration::from_secs(4);
     let err = run_funded_opts(&o, &record(1), 50).await.unwrap_err();
     assert!(err.contains("timed out") && err.contains("swept"), "{err}");
+    assert!(err.contains("Do not send funds to"), "{err}");
     let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
     assert!(p.get_balance(REFUND).await.unwrap() > U256::ZERO);
+}
+
+/// TCP pass-through to `target` that drops every connection (and every request on a kept-alive one)
+/// while `down` is set: an RPC outage. Counts the requests it dropped.
+fn flaky_proxy(target: &str, down: Arc<AtomicBool>, dropped: Arc<AtomicUsize>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let target = target.trim_start_matches("http://").to_string();
+    std::thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            if down.load(SeqCst) {
+                dropped.fetch_add(1, SeqCst);
+                continue; // closes the connection
+            }
+            let server = TcpStream::connect(&target).unwrap();
+            for (mut from, mut to) in [(client.try_clone().unwrap(), server.try_clone().unwrap()), (server, client)] {
+                let (down, dropped) = (down.clone(), dropped.clone());
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 16 * 1024];
+                    while let Ok(n @ 1..) = from.read(&mut buf) {
+                        if down.load(SeqCst) {
+                            dropped.fetch_add(1, SeqCst);
+                            break;
+                        }
+                        if to.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = from.shutdown(Shutdown::Both);
+                    let _ = to.shutdown(Shutdown::Both);
+                });
+            }
+        }
+    });
+    url
+}
+
+/// The RPC fails right after the funding address is shown and recovers only after the payment landed:
+/// the run must keep polling instead of quitting with the payment in flight.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_outage_during_funding_wait_is_retried() {
+    let Some(anvil) = start_anvil().await else { return };
+    let (down, dropped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let proxy = flaky_proxy(&anvil.1, down.clone(), dropped.clone());
+    let (url, d2) = (anvil.1.clone(), down.clone());
+    let rec = record(21);
+    let out = run(&opts(&proxy), &rec, move |r: &FundRequest| {
+        let (url, d2, to, wei) = (url.clone(), d2.clone(), r.sender, r.required_wei);
+        d2.store(true, SeqCst);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await; // >= 2 failed polls
+            send_eth(&url, to, wei).await; // straight to anvil, not through the proxy
+            d2.store(false, SeqCst);
+        });
+    })
+    .await
+    .unwrap();
+    assert!(dropped.load(SeqCst) >= 2, "the outage must have been hit");
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    assert_eq!(stored(&p, out.address).await, rec);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -209,7 +317,222 @@ async fn absurd_fees_are_refused_before_funding() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_url_secret_is_not_leaked_in_errors() {
-    let o = Options { rpc_url: "http://127.0.0.1:1/?key=SECRETKEY", ..opts("") };
-    let err = run(&o, &record(1), |_: &FundRequest| {}).await.unwrap_err();
-    assert!(!err.contains("SECRETKEY"), "{err}");
+    // The second URL is printed by reqwest in its parsed (lowercased) form.
+    for url in ["http://127.0.0.1:1/?key=SECRETKEY", "HTTP://LOCALHOST:1/SECRETKEY"] {
+        let o = Options { rpc_url: url, ..opts("") };
+        let err = run(&o, &record(1), |_: &FundRequest| {}).await.unwrap_err();
+        assert!(!err.to_lowercase().contains("secretkey"), "{err}");
+    }
+}
+
+// ---- The `publish` binary: signals, printed output, arguments. ----
+
+/// The binary with stdout and stderr merged into one line channel ("out: ..." / "err: ...").
+struct Bin {
+    child: Child,
+    lines: mpsc::Receiver<String>,
+    seen: Vec<String>,
+}
+
+impl Bin {
+    fn spawn(args: &[&str]) -> Bin {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_publish")).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let (tx, lines) = mpsc::channel();
+        let pipes: [(&str, Box<dyn Read + Send>); 2] = [("out", Box::new(child.stdout.take().unwrap())), ("err", Box::new(child.stderr.take().unwrap()))];
+        for (tag, pipe) in pipes {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                    let _ = tx.send(format!("{tag}: {line}"));
+                }
+            });
+        }
+        Bin { child, lines, seen: Vec::new() }
+    }
+
+    /// Block (up to 60 s) until a line containing `needle` appears; returns it.
+    fn wait_for(&mut self, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let line = self.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap_or_else(|_| panic!("no line with {needle:?} in {:#?}", self.seen));
+            self.seen.push(line.clone());
+            if line.contains(needle) {
+                return line;
+            }
+        }
+    }
+
+    /// (sender, wei) from the `ethereum:<sender>@<chain>?value=<wei>` funding line.
+    fn funding_request(&mut self) -> (Address, U256) {
+        let line = self.wait_for("ethereum:");
+        let uri = line.split("ethereum:").nth(1).unwrap();
+        (uri.split('@').next().unwrap().parse().unwrap(), uri.split("value=").nth(1).unwrap().trim().parse().unwrap())
+    }
+
+    fn interrupt(&self) {
+        assert!(Command::new("kill").args(["-INT", &self.child.id().to_string()]).status().unwrap().success());
+    }
+
+    /// Wait (up to 120 s) for exit; returns (exit success, every output line).
+    fn finish(mut self) -> (bool, String) {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(s) = self.child.try_wait().unwrap() {
+                break s;
+            }
+            assert!(Instant::now() < deadline, "publish did not exit: {:#?}", self.seen);
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(5)) {
+            self.seen.push(line);
+        }
+        (status.success(), self.seen.join("\n"))
+    }
+}
+
+impl Drop for Bin {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+/// Write `rec` as a record.hex file; returns its path.
+fn record_file(rec: &[u8], name: &str) -> String {
+    let path = std::env::temp_dir().join(format!("epn-publish-test-{}-{name}.hex", std::process::id()));
+    std::fs::write(&path, format!("0x{}\n", alloy::hex::encode(rec))).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn printed_key(out: &str) -> Option<PrivateKeySigner> {
+    out.lines().find_map(|l| l.split("THROWAWAY PRIVATE KEY: ").nth(1)).map(|k| k.trim().parse().unwrap())
+}
+
+/// Ctrl-C while partly funded: the partial funds are swept, and because a payment may still arrive the
+/// user is told not to send more and gets the throwaway key (which must control the sender).
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_ctrl_c_while_waiting_sweeps_and_prints_key() {
+    let Some(anvil) = start_anvil().await else { return };
+    let file = record_file(&record(11), "ctrlc-wait");
+    let mut bin = Bin::spawn(&[&anvil.1, &file, &REFUND.to_string()]);
+    let (sender, wei) = bin.funding_request();
+    send_eth(&anvil.1, sender, wei / U256::from(2)).await;
+    bin.interrupt();
+    let (ok, out) = bin.finish();
+    assert!(!ok, "{out}");
+    assert!(out.contains("interrupted") && out.contains("Do not send funds to"), "{out}");
+    assert_eq!(printed_key(&out).expect("key must be printed").address(), sender);
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    assert!(p.get_balance(REFUND).await.unwrap() > wei / U256::from(3), "partial funds must be swept back");
+    assert!(p.get_balance(sender).await.unwrap() < eth(1));
+}
+
+/// The deploy is stuck in the mempool (mining off) when Ctrl-C arrives. The sweep must REPLACE it
+/// (latest mined nonce 0, higher fee), not queue behind it; nothing is stored then.
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_ctrl_c_with_stuck_deploy_sweep_replaces_it() {
+    let Some(anvil) = start_anvil().await else { return };
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    let file = record_file(&record(12), "stuck");
+    let mut bin = Bin::spawn(&[&anvil.1, &file, &REFUND.to_string()]);
+    let (sender, wei) = bin.funding_request();
+
+    automine(&anvil.1, false).await;
+    send_eth_and_mine(&anvil.1, sender, wei).await;
+    bin.wait_for("deploy tx"); // sent, and never mined while mining is off
+    bin.interrupt();
+    bin.wait_for("sweep tx"); // accepted by the pool at the deploy's nonce
+    mine(&anvil.1).await;
+    let (ok, out) = bin.finish();
+
+    assert!(!ok && out.contains("interrupted") && out.contains("swept"), "{out}");
+    assert!(p.get_code_at(sender.create(0)).await.unwrap().is_empty(), "the stuck deploy must be replaced, not mined: {out}");
+    assert_eq!(p.get_transaction_count(sender).await.unwrap(), 1, "only the sweep was mined");
+    assert!(p.get_balance(REFUND).await.unwrap() > wei * U256::from(9) / U256::from(10), "{out}");
+    assert!(!out.contains("address:"), "nothing is stored, so no sheet: {out}");
+    assert!(printed_key(&out).is_none(), "funds arrived and were swept: the key must stay secret: {out}");
+}
+
+/// Nonce-0 race: the run gives up on a deploy it could not see confirmed (here: RPC down, then Ctrl-C),
+/// but the deploy WAS mined at nonce 0. The sweep must move on to nonce 1, and the run must still say
+/// the record is stored and print the sheet with its address and record id.
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_reports_a_deploy_mined_after_giving_up() {
+    let Some(anvil) = start_anvil().await else { return };
+    let (down, dropped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let proxy = flaky_proxy(&anvil.1, down.clone(), dropped.clone());
+    let rec = record(14);
+    let file = record_file(&rec, "late-deploy");
+    let mut bin = Bin::spawn(&[&proxy, &file, &REFUND.to_string()]);
+    let (sender, wei) = bin.funding_request();
+
+    automine(&anvil.1, false).await;
+    send_eth_and_mine(&anvil.1, sender, wei).await;
+    bin.wait_for("deploy tx");
+    down.store(true, SeqCst); // the binary can no longer see the chain...
+    mine(&anvil.1).await; // ...while its deploy is mined at nonce 0
+    automine(&anvil.1, true).await;
+    bin.interrupt(); // gives up on the deploy while the RPC is down
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    down.store(false, SeqCst);
+    let (ok, out) = bin.finish();
+
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    assert_eq!(stored(&p, sender.create(0)).await, rec);
+    assert!(!ok && out.contains("mined anyway"), "{out}");
+    assert!(out.contains(&format!("out:   address:   {}", sender.create(0))), "{out}");
+    assert!(out.contains(&format!("out:   record id: {}", record_id(&rec))), "{out}");
+    assert_eq!(p.get_transaction_count(sender).await.unwrap(), 2, "deploy at nonce 0, sweep at nonce 1");
+    assert!(p.get_balance(REFUND).await.unwrap() > U256::ZERO, "{out}");
+    assert!(printed_key(&out).is_none(), "{out}");
+}
+
+/// The RPC goes down while the deploy confirms and comes back after it was mined: the run must keep
+/// polling (not give up and let the sweep replace the deploy) and finish normally.
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_rpc_outage_while_deploy_confirms_is_retried() {
+    let Some(anvil) = start_anvil().await else { return };
+    let (down, dropped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let proxy = flaky_proxy(&anvil.1, down.clone(), dropped.clone());
+    let rec = record(15);
+    let file = record_file(&rec, "outage-deploy");
+    let mut bin = Bin::spawn(&[&proxy, &file, &REFUND.to_string()]);
+    let (sender, wei) = bin.funding_request();
+
+    automine(&anvil.1, false).await;
+    send_eth_and_mine(&anvil.1, sender, wei).await;
+    bin.wait_for("deploy tx");
+    down.store(true, SeqCst);
+    mine(&anvil.1).await;
+    automine(&anvil.1, true).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    down.store(false, SeqCst);
+    let (ok, out) = bin.finish();
+
+    assert!(ok, "{out}");
+    assert!(dropped.load(SeqCst) >= 1, "the outage must have been hit");
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    assert_eq!(stored(&p, sender.create(0)).await, rec);
+    assert!(out.contains(&format!("out:   address:   {}", sender.create(0))), "{out}");
+}
+
+/// A failure after the deploy succeeded must still leave the recovery-sheet block on stdout.
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_prints_sheet_even_when_read_back_fails() {
+    let (Some(a), Some(b)) = (start_anvil().await, start_anvil().await) else { return };
+    let rec = record(13);
+    let file = record_file(&rec, "sheet");
+    let mut bin = Bin::spawn(&["--verify-rpc", &b.1, &a.1, &file, &REFUND.to_string()]);
+    let (sender, wei) = bin.funding_request();
+    send_eth(&a.1, sender, wei).await;
+    let (ok, out) = bin.finish();
+    assert!(!ok && out.contains("read-back"), "{out}");
+    assert!(out.contains(&format!("out:   address:   {}", sender.create(0))), "{out}");
+    assert!(out.contains(&format!("out:   record id: {}", record_id(&rec))), "{out}");
+    assert!(printed_key(&out).is_none(), "{out}");
+}
+
+#[test]
+fn binary_rejects_extra_positional_arguments() {
+    let (ok, out) = Bin::spawn(&["http://127.0.0.1:1", "rec.hex", "0x00000000000000000000000000000000000dead1", "extra"]).finish();
+    assert!(!ok && out.contains("unexpected extra argument"), "{out}");
 }

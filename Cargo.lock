@@ -1731,6 +1731,8 @@ name = "epn-publish"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "libc",
+ "sha2",
  "tokio",
 ]
 

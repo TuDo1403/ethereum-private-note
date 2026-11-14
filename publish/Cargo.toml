@@ -12,6 +12,12 @@ rust-version = "1.94"
 # rpc types.
 alloy = { version = "=2.5.0", default-features = false, features = ["essentials", "std", "reqwest", "reqwest-native-tls"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time"] }
+# Record id (SHA-256); the same pinned version core uses.
+sha2 = "=0.10.8"
+
+# Signal handler that only sets a flag (tokio's `signal` feature would need two more crates vendored).
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
 
 [[bin]]
 name = "publish"

@@ -78,6 +78,11 @@ is created from a throwaway account at nonce 0, so its address is `keccak256(rlp
 it back, call `eth_getCode(address)` (`cast code <address>`) and drop the first byte. Nothing else is needed:
 no ABI, no deployed helper contract.
 
+The address holds the record only if the deploy was the sender's nonce-0 transaction. `publish` sends the
+deploy with nonce 0 and nothing else from that key except its sweep; if the sweep had to replace a stuck
+deploy, the address stays empty and `publish` reports that nothing was stored. The largest record (250 bytes)
+gives 251 bytes of code, far below the EIP-170 limit of 24576.
+
 ## Where the record lives
 
 The record is public by design, so keep copies anywhere: its hex printed with share C, email, cloud.
