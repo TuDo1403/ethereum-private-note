@@ -517,6 +517,11 @@ expect "All 6 combinations that open it"
 expect "Press Enter to use this setup"; send "\r"
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 expect "offline and ready."; send "\r"
+# A pasted id that is not on key A: the first key is not listed (key A holds no credential yet, so the
+# fake listing would fail), the secret step fails and says the id is not on the key.
+expect "Plug in only YubiKey A, then press Enter."; send "\r"
+expect "make a new one: "; send "Zm9v\r"
+expect "this credential id is not on the plugged-in key"
 expect "Plug in only YubiKey A, then press Enter."; send "\r"
 expect "make a new one: "; send "\r"
 expect -re {credential id: (\S+)}

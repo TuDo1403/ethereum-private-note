@@ -231,10 +231,11 @@ fn try_yubikey(
     }
     // Each YubiKey share must be a different physical key: otherwise a missed swap, or a pasted id that is
     // really on an earlier key, puts two shares on one key while the self-check still passes and the score
-    // calls the setup strong. The key's listing must hold this share's credential (which also proves a
-    // pasted id is on the key plugged in) and none of an earlier share's. It is asked for only once this
-    // share's credential exists: on a key with no credential for the rp id the tool may fail, not list nothing.
-    if !earlier.is_empty() || !made {
+    // calls the setup strong. The key's listing must hold this share's credential and none of an earlier
+    // share's. It is asked for only once this share's credential exists: on a key with no credential for the
+    // rp id the tool may fail, not list nothing. The first key needs no listing: `fido::secret` below fails
+    // for a pasted id that is not on it.
+    if !earlier.is_empty() {
         println!("Checking which key this is: enter the YubiKey PIN (no touch needed).");
         let listed = fido::credentials(device)?;
         let unused = if made {
@@ -254,7 +255,17 @@ fn try_yubikey(
         }
     }
     println!("Enter the YubiKey PIN, then touch the key when it blinks.");
-    let secret = Zeroizing::new(fido::secret(&cred, device)?);
+    let secret = Zeroizing::new(fido::secret(&cred, device).map_err(|e| {
+        // Unlisted, a pasted id may simply not be on this key: the tool's failure cannot tell that from a
+        // wrong PIN, so both are named.
+        if !made && earlier.is_empty() && e.starts_with("fido2-assert failed") {
+            format!(
+                "{e}\nIf the PIN was right, this credential id is not on the plugged-in key: plug in {label}, or paste the id made on it."
+            )
+        } else {
+            e
+        }
+    })?);
     Ok((cred, secret))
 }
 
