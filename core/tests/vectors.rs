@@ -183,7 +183,7 @@ fn invalid_vectors(record: &[u8], factors: &[(u8, [u8; 32])], random: &[u8]) -> 
     let ct = Aes256Gcm::new_from_slice(&random[..32])
         .unwrap()
         .encrypt(
-            Nonce::from_slice(&record[nonce_at..nonce_at + 12]),
+            &Nonce::try_from(&record[nonce_at..nonce_at + 12]).unwrap(),
             Payload {
                 msg: &plain,
                 aad: &record[..h.header_len()],

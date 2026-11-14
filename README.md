@@ -75,7 +75,7 @@ record.
 
 Requirements:
 
-- **Rust 1.94** (the tested toolchain; edition 2024).
+- **Rust 1.100** (the tested toolchain; edition 2024).
 - **libfido2 command-line tools** (`fido2-token`, `fido2-cred`, `fido2-assert`), needed whenever the
   YubiKey is used:
   - macOS: `brew install libfido2`

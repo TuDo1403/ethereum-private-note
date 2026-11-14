@@ -6,8 +6,8 @@ use expect_test::expect_file;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
-use serde_with::{hex::*, *};
-use std::collections::BTreeSet;
+use serde_with::{base58::*, base64::*, hex::*, *};
+use std::collections::{BTreeMap, BTreeSet};
 
 // This avoids us having to add `#[schemars(crate = "::schemars_0_9")]` all
 // over the place. We're not testing that and it is inconvenient.
@@ -99,6 +99,24 @@ fn schemars_basic() {
         /// A vector of bytes that's serialized as an uppercase hex string.
         #[serde_as(as = "Hex<formats::Uppercase>")]
         uppercase_hex: Vec<u8>,
+
+        /// A vector of bytes that's serialized as a base58 string.
+        #[serde_as(as = "Base58")]
+        base58: Vec<u8>,
+
+        /// A vector of bytes that's serialized as a base58 string in `Flickr`
+        /// charset.
+        #[serde_as(as = "Base58<Flickr>")]
+        base58_flickr: Vec<u8>,
+
+        /// A vector of bytes that's serialized as a base64 string.
+        #[serde_as(as = "Base64")]
+        base64: Vec<u8>,
+
+        /// A vector of bytes that's serialized as a base64 string in URL-safe
+        /// charset.
+        #[serde_as(as = "Base64<UrlSafe>")]
+        base64_urlsafe: Vec<u8>,
     }
 
     let schema = schemars::schema_for!(Basic);
@@ -115,8 +133,8 @@ fn schemars_other_cfg_attrs() {
     #[derive(JsonSchema, Serialize)]
     struct Test {
         #[serde_as(as = "DisplayFromStr")]
-        #[cfg_attr(any(), arbitrary("some" |weird| syntax::<bool, 2>()))]
-        #[cfg_attr(any(), schemars(with = "i32"))]
+        #[cfg_attr(false, arbitrary("some" |weird| syntax::<bool, 2>()))]
+        #[cfg_attr(false, schemars(with = "i32"))]
         custom: i32,
     }
 
@@ -135,11 +153,11 @@ fn schemars_custom_with() {
         custom: i32,
 
         #[serde_as(as = "DisplayFromStr")]
-        #[cfg_attr(any(), schemars(with = "i32"))]
+        #[cfg_attr(false, schemars(with = "i32"))]
         with_disabled: i32,
 
         #[serde_as(as = "DisplayFromStr")]
-        #[cfg_attr(all(), schemars(with = "i32"))]
+        #[cfg_attr(true, schemars(with = "i32"))]
         always_enabled: i32,
     }
 
@@ -189,6 +207,7 @@ fn schemars_deserialize_only_bug_735() {
 }
 
 #[test]
+#[allow(unused_qualifications)]
 fn schemars_custom_schema_with() {
     fn custom_int(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         use schemars::json_schema;
@@ -206,11 +225,11 @@ fn schemars_custom_schema_with() {
         custom: i32,
 
         #[serde_as(as = "DisplayFromStr")]
-        #[cfg_attr(any(), schemars(schema_with = "custom_int"))]
+        #[cfg_attr(false, schemars(schema_with = "custom_int"))]
         with_disabled: i32,
 
         #[serde_as(as = "DisplayFromStr")]
-        #[cfg_attr(all(), schemars(schema_with = "custom_int"))]
+        #[cfg_attr(true, schemars(schema_with = "custom_int"))]
         always_enabled: i32,
     }
 
@@ -368,9 +387,23 @@ mod snapshots {
             }
         }
 
+        set_last_value_wins_displaysfromstr {
+            struct Test {
+                #[serde_as(as = "SetLastValueWins<DisplayFromStr>")]
+                data: BTreeSet<u32>,
+            }
+        }
+
         set_prevent_duplicates {
             struct Test {
                 #[serde_as(as = "SetPreventDuplicates<_>")]
+                data: BTreeSet<u32>,
+            }
+        }
+
+        set_prevent_duplicates_displaysfromstr {
+            struct Test {
+                #[serde_as(as = "SetPreventDuplicates<DisplayFromStr>")]
                 data: BTreeSet<u32>,
             }
         }
@@ -460,7 +493,7 @@ mod derive {
 
     #[serde_as]
     #[derive(Serialize)]
-    #[cfg_attr(all(), derive(JsonSchema))]
+    #[cfg_attr(true, derive(JsonSchema))]
     struct Enabled {
         #[serde_as(as = "DisplayFromStr")]
         field: u32,
@@ -469,7 +502,7 @@ mod derive {
     #[allow(dead_code)]
     #[serde_as]
     #[derive(Serialize)]
-    #[cfg_attr(any(), derive(JsonSchema))]
+    #[cfg_attr(false, derive(JsonSchema))]
     struct Disabled {
         // If we are incorrectly adding `#[schemars(with = ...)]` attributes
         // then we should get an error on this field.
@@ -1135,4 +1168,130 @@ fn test_rangeinclusive() {
     struct S(#[serde_as(as = "ops::RangeInclusive<DisplayFromStr>")] ops::RangeInclusive<u32>);
 
     check_valid_json_schema(&S(3..=7));
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn test_jsonstring() {
+    use serde_with::json::JsonString;
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct S(#[serde_as(as = "JsonString")] BTreeSet<u32>);
+
+    check_valid_json_schema(&S(BTreeSet::from_iter([1, 2, 3])));
+}
+
+#[test]
+fn test_map_first_key_wins() {
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct S(#[serde_as(as = "MapFirstKeyWins<DisplayFromStr,DisplayFromStr>")] BTreeMap<u32, u32>);
+
+    check_valid_json_schema(&S(BTreeMap::from_iter([(1, 10), (2, 20), (3, 30)])));
+}
+
+#[test]
+fn test_map_prevent_duplicates() {
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct S(
+        #[serde_as(as = "MapPreventDuplicates<DisplayFromStr,DisplayFromStr>")] BTreeMap<u32, u32>,
+    );
+
+    check_valid_json_schema(&S(BTreeMap::from_iter([(1, 10), (2, 20), (3, 30)])));
+}
+
+#[test]
+fn test_set_last_value_wins() {
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct S(#[serde_as(as = "SetLastValueWins<DisplayFromStr>")] BTreeSet<u32>);
+
+    check_valid_json_schema(&S(BTreeSet::from_iter([1, 2, 3])));
+}
+
+#[test]
+fn test_set_prevent_duplicates() {
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct S(#[serde_as(as = "SetPreventDuplicates<DisplayFromStr>")] BTreeSet<u32>);
+
+    check_valid_json_schema(&S(BTreeSet::from_iter([1, 2, 3])));
+}
+
+#[test]
+fn test_nonzero() {
+    use core::num::{NonZeroI16, NonZeroI64, NonZeroU32, NonZeroU8, NonZeroUsize};
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct SU8(#[serde_as(as = "NoneAsZero")] Option<NonZeroU8>);
+
+    check_valid_json_schema(&SU8(NonZeroU8::new(0)));
+    check_valid_json_schema(&SU8(NonZeroU8::new(5)));
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct SI16(#[serde_as(as = "NoneAsZero")] Option<NonZeroI16>);
+
+    check_valid_json_schema(&SI16(NonZeroI16::new(0)));
+    check_valid_json_schema(&SI16(NonZeroI16::new(-16)));
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct SU32(#[serde_as(as = "NoneAsZero")] Option<NonZeroU32>);
+
+    check_valid_json_schema(&SU32(NonZeroU32::new(0)));
+    check_valid_json_schema(&SU32(NonZeroU32::new(98765)));
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct SI64(#[serde_as(as = "NoneAsZero")] Option<NonZeroI64>);
+
+    check_valid_json_schema(&SI64(NonZeroI64::new(0)));
+    check_valid_json_schema(&SI64(NonZeroI64::new(-987654321)));
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct SUsize(#[serde_as(as = "NoneAsZero")] Option<NonZeroUsize>);
+
+    check_valid_json_schema(&SUsize(NonZeroUsize::new(0)));
+    check_valid_json_schema(&SUsize(NonZeroUsize::new(123)));
+}
+
+mod none_as_empty_string {
+    use super::*;
+
+    #[serde_as]
+    #[derive(JsonSchema, Serialize)]
+    #[serde(transparent)]
+    struct S(#[serde_as(as = "NoneAsEmptyString")] Option<u32>);
+
+    #[test]
+    fn test_serialized_is_valid() {
+        check_valid_json_schema(&S(None));
+        check_valid_json_schema(&S(Some(42)));
+    }
+
+    #[test]
+    fn test_null_is_valid() {
+        check_matches_schema::<S>(&json!(null));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_number_is_invalid() {
+        check_matches_schema::<S>(&json!(42));
+    }
 }

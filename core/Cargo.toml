@@ -2,7 +2,7 @@
 name = "epn-core"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum
+rust-version = "1.100"  # the toolchain this was tested with, not a proven minimum
 
 publish = false
 
@@ -10,14 +10,14 @@ publish = false
 workspace = true
 
 [dependencies]
-aes-gcm = "=0.10.3"
-argon2 = "=0.5.3"
-base64ct = { version = "=1.6.0", features = ["alloc"] }  # encodes fido2 tool I/O
-getrandom = "=0.2.17"                                    # OS randomness
+aes-gcm = "=0.11.1"
+argon2 = "=0.6.0"
+base64ct = { version = "=1.8.3", features = ["alloc"] }  # encodes fido2 tool I/O
+getrandom = "=0.4.3"                                    # OS randomness
 hex = "=0.4.3"                                           # hex text of records and secrets
-hkdf = "=0.12.4"
-sha2 = "=0.10.8"
-unicode-normalization = "=0.1.24"
+hkdf = "=0.13.0"
+sha2 = "=0.11.1"
+unicode-normalization = "=0.1.26"
 
 [dev-dependencies]
-serde_json = "=1.0.133"
+serde_json = "=1.0.154"
