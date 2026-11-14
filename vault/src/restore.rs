@@ -64,9 +64,12 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     println!(
         "Restore your seed. You need the record and enough of its factors (2 of 3 for a backup made by `vault`).\n"
     );
-    println!("  1. restore: show the seed words (do this offline, nobody watching the screen)");
-    println!("  2. verify only: check the factors and show the seed fingerprint, never the seed\n");
-    let verify_only = choose_1_or_2()? == 2;
+    let modes = [
+        "Verify only: check the factors and show the seed fingerprint, never the seed",
+        "Restore: show the seed words (offline, nobody watching the screen)",
+    ];
+    // Verify only comes first: it is the safe default for the test restores a backup asks for.
+    let verify_only = choose("What should this run do?", &modes)? == 0;
     let (record, h, hints) = read_record()?;
     let mut sheet_cred = hints.cred;
     let op_ref = |x: u8| hints.op_refs.iter().find(|r| r.x == x);
@@ -153,10 +156,14 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
             .filter(|&(&x, _)| kind(x) == Kind::Paper)
             .map(|(&x, w)| (x, w.as_str()))
             .collect();
-        if pass.is_some() {
-            println!("Stretching the passphrase (Argon2id, 1 GiB; takes a while)...");
-        }
-        match restore(&record, pass, &hardware, &paper) {
+        let opened = if pass.is_some() {
+            working("Stretching the passphrase (Argon2id, 1 GiB)", || {
+                restore(&record, pass, &hardware, &paper)
+            })
+        } else {
+            restore(&record, pass, &hardware, &paper)
+        };
+        match opened {
             Ok((words, used)) => {
                 let words = Zeroizing::new(words);
                 if verify_only {

@@ -138,7 +138,7 @@ stored as the code of a new contract, so nothing needs to be deployed on the cha
 On the **offline** machine, with the YubiKey plugged in:
 
 ```bash
-./vault backup                  # or just ./vault and pick 1
+./vault backup                  # or just ./vault and pick "Make a new backup"
 ./vault backup --device PATH    # when several FIDO2 keys are plugged in (see `fido2-token -L`)
 ```
 
@@ -146,9 +146,9 @@ On the **offline** machine, with the YubiKey plugged in:
 the output folder `./backup-<timestamp>/` and checks that it can write there. Then it walks through six
 steps:
 
-1. **Second factor.** Choose 1 for the YubiKey: press Enter to create a new resident credential (PIN,
+1. **Second factor.** Pick YubiKey (arrow keys, Enter), then press Enter to create a new resident credential (PIN,
    then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it goes
-   on the recovery sheet. Or choose 2 for 1Password (Touch ID) and name the personal account (sign-in
+   on the recovery sheet. Or pick 1Password (Touch ID) and name the personal account (sign-in
    address or email, see `op account list`) and a vault in it (see `op vault list --account <account>`).
    After step 4, share 2 is stored there as the item `epn-share-2-<record id>` (the words go
    to `op` through stdin, never the command line or a file) and read back once to check it; 1Password
@@ -218,7 +218,7 @@ The output must be `0x00` followed by the contents of `record.hex` (without its 
 ## Testing the backup
 
 **Do not trust a backup you have not restored.** On the offline machine, right after making it, run
-`vault restore`, choose **2 (verify only)**, and restore with each of the three pairs:
+`vault restore`, pick **Verify only** (the first, default item), and restore with each of the three pairs:
 
 1. passphrase + YubiKey
 2. passphrase + paper share
@@ -242,7 +242,8 @@ the seed is printed on screen.
 ./vault restore [--device PATH]
 ```
 
-Choose 1 to show the seed or 2 to verify only (seed fingerprint, never the seed). Paste the record
+Pick **Verify only** (seed fingerprint, never the seed; the default) or **Restore** (shows the seed) with
+the arrow keys and Enter. Paste the record
 hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the credential id).
 Say which factors you have; the YubiKey is asked first so a missing key or wrong PIN fails before you
 type anything. The paper share is entered word by word, the passphrase hidden. Three attempts. This is
