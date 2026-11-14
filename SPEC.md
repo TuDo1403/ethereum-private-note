@@ -104,9 +104,11 @@ word") is not part of this backup.
 - **Paper share**: 32 bytes as 24 BIP39 English words (standard entropy-to-words encoding, checksum
   included). It looks like a seed and is not one. Where it is kept is not part of the format: `vault`
   can keep share 2 in 1Password instead of on a YubiKey, as a Password item whose value is the 24 words,
-  named `epn-share-2-<record id>` and read with `op read op://<vault>/<item>/password` (1Password asks for
-  Touch ID). The recovery sheet names it on a line `1password: share 2 op://...`. Such a share must not
-  sit in the same account as another factor of the record.
+  named `epn-share-2-<record id>` and read with `op read --account <account> op://<vault>/<item>/password`
+  (1Password asks for Touch ID). The recovery sheet names it on a line
+  `1password: share 2 op://<vault>/<item>/password account <account>`; the account is always given,
+  because with several accounts signed in `op` would otherwise pick one. Such a share must sit in a
+  personal account, never a work one, and not in the same account as another factor of the record.
 
 Using a YubiKey also needs its credential id (base64, printed by `vault backup` and on the recovery
 sheet). It is not secret and is useless without the key. If the sheet is lost it can be listed from the

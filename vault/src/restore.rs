@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 #[derive(Default)]
 struct SheetHints {
     cred: Option<String>,
-    op_refs: Vec<(u8, String)>,
+    op_refs: Vec<onepassword::SheetRef>,
 }
 
 /// The record, from a pasted hex string or a record.hex file (with the hints of the sheet beside it).
@@ -55,7 +55,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     let verify_only = choose_1_or_2()? == 2;
     let (record, h, hints) = read_record()?;
     let mut sheet_cred = hints.cred;
-    let op_ref = |x: u8| hints.op_refs.iter().find(|r| r.0 == x).map(|r| r.1.as_str());
+    let op_ref = |x: u8| hints.op_refs.iter().find(|r| r.x == x);
 
     let held: Vec<u8> = loop {
         println!("\nThis record needs any {} of its {} factors. Which do you have with you?", h.k, h.kinds.len());
@@ -98,8 +98,8 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
             println!();
             let secret = match (kind(x), op_ref(x)) {
                 (Kind::Passphrase, _) => ask_hidden("passphrase, exactly as written (hidden): ")?,
-                (_, Some(r)) if yes(&format!("Read share {x} from 1Password ({r}); it asks for Touch ID?"))? => {
-                    onepassword::read(r)?
+                (_, Some(r)) if yes(&format!("Read share {x} from 1Password ({}, account {}); it asks for Touch ID?", r.reference, r.account))? => {
+                    onepassword::read(&r.account, &r.reference)?
                 }
                 _ => enter_paper_share(x)?,
             };

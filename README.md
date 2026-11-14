@@ -105,8 +105,10 @@ the offline machine you will use.
   **Or 1Password with Touch ID** instead of the YubiKey: share 2 is then kept as a 1Password item and
   read back with Touch ID. Install the `op` command and turn on *Settings > Developer > Integrate with
   1Password CLI* in the 1Password app. This is a weaker factor than a YubiKey: the share syncs with
-  your 1Password account and is as safe as that account, not tied to one device. **Never keep the
-  passphrase or the paper share in that same account**, or one breach of it gives two factors.
+  your 1Password account and is as safe as that account, not tied to one device. Use a **personal**
+  account, never a work one (its admins can reach it, and you lose it with the job); `vault` asks for
+  the account explicitly and passes it to every `op` call. **Never keep the passphrase or the paper
+  share in that same account**, or one breach of it gives two factors.
 - **Paper and a pen** for the passphrase and the paper share. Steel plates if you want fire/water resistance.
 - **An online machine** for `publish` (later, no secrets involved).
 - **A wallet with a little ETH** on the chain you choose, to fund the throwaway publishing address.
@@ -146,8 +148,9 @@ steps:
 
 1. **Second factor.** Choose 1 for the YubiKey: press Enter to create a new resident credential (PIN,
    then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it goes
-   on the recovery sheet. Or choose 2 for 1Password (Touch ID) and name the 1Password vault (Enter for
-   `Private`). After step 4, share 2 is stored there as the item `epn-share-2-<record id>` (the words go
+   on the recovery sheet. Or choose 2 for 1Password (Touch ID) and name the personal account (sign-in
+   address or email, see `op account list`) and a vault in it (see `op vault list --account <account>`).
+   After step 4, share 2 is stored there as the item `epn-share-2-<record id>` (the words go
    to `op` through stdin, never the command line or a file) and read back once to check it; 1Password
    asks for Touch ID. The sheet names the item's `op://` reference, and `vault restore` offers to read it
    from 1Password instead of typing it.

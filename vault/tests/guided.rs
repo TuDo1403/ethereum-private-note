@@ -87,7 +87,9 @@ expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 expect "offline and ready."; send "\r"
 expect "1 or 2: "; send "2\r"
-expect {(Enter for "Private"): }; send "\r"
+expect "PERSONAL 1Password account"
+expect "e.g. my.1password.com): "; send "my.1password.com\r"
+expect "lists them): "; send "Personal\r"
 expect "OUT of this 1Password account"
 expect "Type your seed words"; secret $env(SEED)
 expect "Type them again"; secret $env(SEED)
@@ -203,7 +205,8 @@ case "$1" in
         title=$(printf '%s' "$json" | sed -n 's/.*"title":"\([^"]*\)".*/\1/p')
         printf '%s' "$json" | sed -n 's/.*"value":"\([^"]*\)".*/\1/p' | tr -d '\n' > "$WORK/op-$title"
         echo "ID: fake" ;;
-  read) cat "$WORK/op-$(printf '%s' "$3" | cut -d/ -f4)" ;;
+  read) for a; do ref=$a; done
+        cat "$WORK/op-$(printf '%s' "$ref" | cut -d/ -f4)" ;;
   *) exit 1 ;;
 esac"#;
 
@@ -222,17 +225,20 @@ fn backup_with_1password_then_verify_only_restore() {
     assert_eq!((h.k, h.kinds.clone(), record.len()), (2, vec![Passphrase, Paper, Paper], 120));
 
     let title = format!("epn-share-2-{}", epn_core::record_id(&record));
-    let reference = format!("op://Private/{title}/password");
+    let reference = format!("op://Personal/{title}/password");
     let stored = std::fs::read_to_string(work.join(format!("op-{title}"))).unwrap();
     assert!(epn_core::bip39::share_from_words(&stored).is_ok(), "1Password holds a valid share: {stored:?}");
     let argv = std::fs::read_to_string(work.join("op-argv.log")).unwrap();
     // The share's first three words never appear in op's arguments (they went through stdin).
     let start: Vec<&str> = stored.split(' ').take(3).collect();
     assert!(!argv.contains(&start.join(" ")), "a share went through op's argv:\n{argv}");
-    assert!(argv.contains("item create --vault Private -") && argv.contains(&format!("read --no-newline {reference}")), "{argv}");
+    // Every op call names the account: with a work account also signed in, op must never pick one itself.
+    assert!(argv.lines().count() >= 3 && argv.lines().all(|l| l.contains("--account my.1password.com ")), "{argv}");
+    assert!(argv.contains("item create --account my.1password.com --vault Personal -"), "{argv}");
+    assert!(argv.contains(&format!("read --account my.1password.com --no-newline {reference}")), "{argv}");
 
     let sheet = std::fs::read_to_string(dir.join("recovery-sheet.txt")).unwrap();
-    assert!(sheet.contains(&format!("1password:        share 2 {reference}")), "{sheet}");
+    assert!(sheet.contains(&format!("1password:        share 2 {reference} account my.1password.com")), "{sheet}");
     assert!(sheet.contains("1Password item (Touch ID)") && !sheet.contains("credential:") && !sheet.contains("--key"), "{sheet}");
     std::fs::remove_dir_all(&work).unwrap();
 }

@@ -18,23 +18,23 @@ const PASS_X: u8 = 1;
 pub const KEY_X: u8 = 2;
 const PAPER_X: u8 = 3;
 
-/// The second factor: a YubiKey (its credential id) or 1Password (the vault share 2 goes into).
+/// The second factor: a YubiKey (its credential id) or 1Password (the account and vault share 2 goes into).
 enum Second {
     YubiKey(String),
-    OnePassword(String),
+    OnePassword { account: String, vault: String },
 }
 
 impl Second {
     fn kinds(&self) -> [Kind; 3] {
         match self {
             Second::YubiKey(_) => [Kind::Passphrase, Kind::Hardware, Kind::Paper],
-            Second::OnePassword(_) => [Kind::Passphrase, Kind::Paper, Kind::Paper],
+            Second::OnePassword { .. } => [Kind::Passphrase, Kind::Paper, Kind::Paper],
         }
     }
     fn name(&self) -> &'static str {
         match self {
             Second::YubiKey(_) => "YubiKey (+ its PIN)",
-            Second::OnePassword(_) => "1Password item (Touch ID)",
+            Second::OnePassword { .. } => "1Password item (Touch ID)",
         }
     }
 }
@@ -80,10 +80,13 @@ fn sheet(record: &[u8], second: &Second, op_ref: &str, fingerprint: &str) -> Str
             format!(" --key {KEY_X}={cred}"),
             format!("pass <passphrase>        paper {PAPER_X} <24 words>"),
         ),
-        Second::OnePassword(_) => (
-            format!("{:<18}share {} {op_ref}   (read with `op read`; 1Password asks for Touch ID)", onepassword::SHEET_PREFIX, onepassword::X),
+        Second::OnePassword { account, .. } => (
+            format!("{}   (1Password asks for Touch ID)", onepassword::sheet_line(onepassword::X, op_ref, account)),
             String::new(),
-            format!("pass <passphrase>   paper {} <words from `op read`>   paper {PAPER_X} <24 words>", onepassword::X),
+            format!(
+                "pass <passphrase>   paper {} <words from `op read --account {account} <reference>`>   paper {PAPER_X} <24 words>",
+                onepassword::X
+            ),
         ),
     };
     format!(
@@ -220,12 +223,16 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
             id
         })
     } else {
-        let v = ask("1Password vault to keep share 2 in (Enter for \"Private\"): ")?;
-        let vault = if v.is_empty() { "Private".to_string() } else { v };
+        // Both asked for explicitly: with several accounts signed in, a default would let `op` choose, and
+        // a work account (whose admins can reach it, and which ends with the job) must never be chosen silently.
+        println!("Use a PERSONAL 1Password account, never a work one. `op account list` shows yours.");
+        let account = ask("1Password account for share 2 (sign-in address or email, e.g. my.1password.com): ")?;
+        onepassword::check_account(&account)?;
+        let vault = ask(&format!("Vault in that account (`op vault list --account {account}` lists them): "))?;
         onepassword::check_name("vault name", &vault)?;
         println!("Keep the passphrase and the paper share OUT of this 1Password account: one account would then");
         println!("hold two factors, and one breach of it would be enough to restore the seed.");
-        Second::OnePassword(vault)
+        Second::OnePassword { account, vault }
     };
 
     println!("\n2/6 Seed");
@@ -248,7 +255,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
             println!("Enter the YubiKey PIN, then touch the key when it blinks.");
             Some(Zeroizing::new(fido::secret(cred, device.as_deref())?))
         }
-        Second::OnePassword(_) => None,
+        Second::OnePassword { .. } => None,
     };
     let (record, paper) = build_record(&entropy, &pass, &second.kinds(), prf.as_deref())?;
 
@@ -257,20 +264,20 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     let fingerprint = seed_fingerprint(&entropy);
     let title = format!("epn-share-{}-{}", onepassword::X, record_id(&record));
     let op_ref = match &second {
-        Second::OnePassword(vault) => onepassword::reference(vault, &title),
+        Second::OnePassword { vault, .. } => onepassword::reference(vault, &title),
         Second::YubiKey(_) => String::new(),
     };
     save(&format!("{dir}/record.hex"), &format!("0x{}\n", hex(&record)))?;
     save(&format!("{dir}/recovery-sheet.txt"), &sheet(&record, &second, &op_ref, &fingerprint))?;
     println!("Saved two PUBLIC files in ./{dir}/ : record.hex and recovery-sheet.txt");
 
-    if let Second::OnePassword(vault) = &second {
+    if let Second::OnePassword { account, vault } = &second {
         let words = paper_words(&paper, onepassword::X);
-        println!("\nStoring share {} in 1Password (vault \"{vault}\"). 1Password may ask for Touch ID.", onepassword::X);
+        println!("\nStoring share {} in 1Password (account {account}, vault \"{vault}\"). 1Password may ask for Touch ID.", onepassword::X);
         // Read back through the same path a restore uses, so a wrong vault, a sync problem or a template
         // 1Password does not accept is caught now and not on the day the share is needed.
-        let stored = onepassword::store(vault, &title, &words).and_then(|r| {
-            let back = onepassword::read(&r)?;
+        let stored = onepassword::store(account, vault, &title, &words).and_then(|r| {
+            let back = onepassword::read(account, &r)?;
             if *back == *words { Ok(r) } else { Err("the item read back from 1Password is not the share stored".into()) }
         });
         let reference = stored.map_err(|e| {
