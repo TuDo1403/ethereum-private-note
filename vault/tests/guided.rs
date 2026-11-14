@@ -626,8 +626,9 @@ fn backup_two_keys_from_plan() {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
-/// A custom setup with two 1Password shares and a paper share (no passphrase: no Argon2): `vault op-store`
-/// asks which share to store and stores only that one, under its own share number.
+/// A custom setup with two 1Password shares in one account and a paper share (no passphrase: no Argon2):
+/// scored weak (one account breach opens it) and taken with `yes`; `vault op-store` asks which share to
+/// store and stores only that one, under its own share number.
 const SCRIPT_OP_PICK: &str = r#"
 spawn $env(VAULT) backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
@@ -645,7 +646,10 @@ foreach label {A B} {
 place "1Password A" 0 home
 place "1Password B" 1 office
 place paper 2 parents
-expect "Press Enter to use this setup"; send "\r"
+# Both 1Password shares are in one account: one breach opens it, so the setup is weak whatever the places.
+expect "Theft   ⚠ weak"
+expect "one breach of the 1Password account my.1password.com opens it: 1Password A + 1Password B"
+expect "type yes"; send "yes\r"
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 expect "offline and ready."; send "\r"
 expect "Type your seed words"; secret $env(SEED)

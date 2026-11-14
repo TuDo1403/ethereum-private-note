@@ -89,6 +89,11 @@ pub fn score(layout: &Layout, places: Option<&[String]>) -> Score {
     };
 
     let mut theft_weak = false;
+    let raise = if k < n {
+        format!(", or use {} of {n}", k + 1)
+    } else {
+        String::new()
+    };
     if let Some(places) = places {
         // One warning per place, naming the first combination (lexicographic) that it holds whole.
         let mut warned: Vec<&String> = Vec::new();
@@ -98,17 +103,35 @@ pub fn score(layout: &Layout, places: Option<&[String]>) -> Score {
                 warned.push(place);
                 theft_weak = true;
                 let names: Vec<&str> = c.iter().map(|&i| label(i)).collect();
-                let raise = if k < n {
-                    format!(", or use {} of {n}", k + 1)
-                } else {
-                    String::new()
-                };
                 warnings.push(format!(
                     "one break-in at {place} opens it: {} → keep {} somewhere else{raise}",
                     names.join(" + "),
                     names[names.len() - 1]
                 ));
             }
+        }
+    }
+    // 1Password shares in one account are one place to a thief: one breach of that account opens them all.
+    // The account is in the setup, so this applies with places unknown too. Accounts are ASCII (check_account).
+    let account = |i: usize| match &layout.shares[i].kind {
+        ShareKind::OnePassword { account, .. } => Some(account.as_str()),
+        _ => None,
+    };
+    let mut warned: Vec<&str> = Vec::new();
+    for c in &combos {
+        let Some(first) = account(c[0]) else {
+            continue;
+        };
+        let same = |i: &usize| account(*i).is_some_and(|a| a.eq_ignore_ascii_case(first));
+        if c.iter().all(same) && !warned.iter().any(|w| w.eq_ignore_ascii_case(first)) {
+            warned.push(first);
+            theft_weak = true;
+            let names: Vec<&str> = c.iter().map(|&i| label(i)).collect();
+            warnings.push(format!(
+                "one breach of the 1Password account {first} opens it: {} → keep {} in another account{raise}",
+                names.join(" + "),
+                names[names.len() - 1]
+            ));
         }
     }
     let needs_yubikey = |c: &Vec<usize>| {
@@ -270,5 +293,45 @@ mod tests {
                 .any(|w| w.ends_with("→ keep YubiKey somewhere else"))
         );
         assert!(is_weak(&s));
+    }
+
+    #[test]
+    fn one_account_holding_a_combination_is_weak() {
+        // 1Password A and B in one account: one breach opens it, wherever the places are, and with none.
+        let same = lay("2of3 op,op,paper");
+        for p in [Some(places(["a", "b", "c"])), None] {
+            let s = score(&same, p.as_deref());
+            assert_eq!(s.theft, Verdict::Weak);
+            assert!(s.warnings.iter().any(|w| {
+                w == "one breach of the 1Password account my.1password.com opens it: 1Password A + 1Password B → keep 1Password B in another account, or use 3 of 3"
+            }), "{:?}", s.warnings);
+        }
+        // the account is compared case aside, and warned about once
+        let mut shares = same.shares.clone();
+        shares[1].kind = ShareKind::OnePassword {
+            account: "My.1Password.com".into(),
+            vault: "Private".into(),
+        };
+        let s = score(&Layout::new(2, shares.clone()).unwrap(), None);
+        assert_eq!(s.theft, Verdict::Weak);
+        // 3 of 3 needs the paper too: no combination lies in the account
+        assert_eq!(score(&lay("3of3 op,op,paper"), None).theft, Verdict::Ok);
+        // different accounts: not weak by this rule
+        shares[1].kind = ShareKind::OnePassword {
+            account: "other.1password.com".into(),
+            vault: "Private".into(),
+        };
+        let s = score(
+            &Layout::new(2, shares).unwrap(),
+            Some(&places(["a", "b", "c"])),
+        );
+        assert_eq!(s.theft, Verdict::Ok);
+        assert!(!s.warnings.iter().any(|w| w.contains("breach")));
+        // 3 of 4 with three shares in one account
+        let s = score(&lay("3of4 op,op,op,paper"), None);
+        assert_eq!(
+            s.warnings.iter().filter(|w| w.contains("breach")).count(),
+            1
+        );
     }
 }
