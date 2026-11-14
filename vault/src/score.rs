@@ -249,6 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn losing_a_shared_1password_account_is_weak() {
+        // 4 of 5, two shares in one account: losing it leaves 3 < 4, with or without places
+        let spec = lay("4of5 key,key,paper,op,op");
+        for p in [None, Some(places(["a", "b", "c", "d", "e"]))] {
+            let s = score(&spec, p.as_deref());
+            assert_eq!(s.loss, Verdict::Weak);
+            assert!(s.warnings.iter().any(|w| w.contains(
+                "losing the 1Password account my.1password.com leaves 3 shares; you need 4 → keep 1Password A in another account"
+            )));
+        }
+        // one share per account is fine
+        assert_eq!(
+            score(&lay("4of5 key,key,paper,paper,op"), None).loss,
+            Verdict::Ok
+        );
+    }
+
+    #[test]
     fn theft_rules() {
         // every k-subset needs a YubiKey -> Strong
         assert_eq!(

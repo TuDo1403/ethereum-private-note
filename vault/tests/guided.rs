@@ -15,7 +15,7 @@ set timeout 300
 proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # Starts `vault` with the given arguments; every expect then fails on a timeout or an early end.
 proc start {args} {
-    global spawn_id
+    global spawn_id spawn_out
     spawn $::env(VAULT) {*}$args
     # On several lines: expect 5.45 does not read a one-line braced list as pattern/action pairs.
     expect_after {
@@ -28,7 +28,6 @@ proc start {args} {
 # A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
 # echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
 proc secret {s} {
-    # spawn sets spawn_out at the top level; without this the stty read always fails and only the 10 s cap waits.
     global spawn_out
     for {set i 0} {$i < 200} {incr i} {
         if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
@@ -367,7 +366,7 @@ foreach run {first second} {
     expect eof
 }
 
-foreach fails {0 1} {
+foreach fails {0 1 2} {
     if {$fails} { set env(FAKE_OP_READ_FAILS) 1 }
     restore_start $dir/record.hex
     answer "share 1: 1Password A" n
@@ -375,8 +374,21 @@ foreach fails {0 1} {
     answer "share 3: paper (paper share (24 words))" y
     answer "it asks for Touch ID?" y
     # A failing `op read` (locked, Touch ID cancelled) must not end the restore: it falls back to the paper.
-    if {$fails} { expect "Type the 24 words from the paper instead"; type_words $share(2) }
-    type_words $share(3)
+    if {$fails} { expect "Type the 24 words from the paper instead" }
+    if {$fails == 2} {
+        # Giving up on a share (an empty answer to "Which word number") leaves it out, and it is offered again.
+        type_words [lrepeat 24 abandon]
+        expect "Which word number"; send "\r"
+        type_words $share(3)
+        answer "Enter share 2" y
+        answer "Enter share 3" n
+        answer "it asks for Touch ID?" y
+        expect "Type the 24 words from the paper instead"
+        type_words $share(2)
+    } else {
+        if {$fails} { type_words $share(2) }
+        type_words $share(3)
+    }
     fingerprint_is $fp
 }
 puts "\nDIR=$dir FP=$fp"

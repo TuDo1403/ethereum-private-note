@@ -61,6 +61,11 @@ async fn start_anvil_with(extra: &[&str]) -> Option<Anvil> {
                 continue 'start;
             }
             if answered {
+                // A node that answers while ours is dying belongs to another test that took the port.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                if anvil.0.try_wait().unwrap().is_some() {
+                    continue 'start;
+                }
                 return Some(anvil);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

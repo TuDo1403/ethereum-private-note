@@ -105,8 +105,12 @@ fn key_secret(
             };
             println!("\nEnter the PIN, then touch the YubiKey that is share {x} when it blinks.");
             let secret = fido::secret(&cred, device);
-            // Only a failure with the key itself spends the sheet's id, not a second key left plugged in.
-            if secret.as_ref().is_err_and(|e| !several_keys(e)) {
+            // Only a failure with the key itself spends the sheet's id, not a key left out or a second one
+            // left plugged in.
+            if secret
+                .as_ref()
+                .is_err_and(|e| !several_keys(e) && !e.starts_with("no FIDO2 key found"))
+            {
                 from_sheet = None;
             }
             secret.map(Zeroizing::new)
@@ -189,12 +193,21 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
         .copied()
         .filter(|&x| kind(x) != Kind::Hardware)
         .collect();
+    let typable = redo.clone();
     for attempt in 1..=TRIES {
         for &x in &redo {
             println!();
             let secret = match kind(x) {
                 Kind::Passphrase => ask_hidden("passphrase, exactly as written (hidden): ")?,
-                _ => paper_share(x, on_sheet(x))?,
+                // A paper share given up on is left out: the other shares may still open the record.
+                _ => match paper_share(x, on_sheet(x)) {
+                    Ok(words) => words,
+                    Err(e) => {
+                        println!("{e}");
+                        typed.remove(&x);
+                        continue;
+                    }
+                },
             };
             typed.insert(x, secret);
         }
@@ -250,7 +263,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
                     "Passphrase: lowercase, one space between words, exactly as written. Paper share: words in order."
                 );
                 redo = Vec::new();
-                for &x in typed.keys() {
+                for &x in &typable {
                     if yes(&format!(
                         "Enter share {x} ({}) again?",
                         describe(kind(x), on_sheet(x))

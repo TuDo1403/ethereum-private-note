@@ -3,7 +3,7 @@
 Enough to reimplement recovery in any language. `vectors.json` holds fixed inputs and every intermediate
 value; an implementation is correct if it reproduces them byte for byte. Print this with the paper share.
 
-All integers big endian. Hex has no `0x` prefix. `||` is concatenation. The record carries a version byte
+All integers big endian. Hex has no `0x` prefix (the file `record.hex` is the one place that keeps it). `||` is concatenation. The record carries a version byte
 (`0x01`); any other version is refused.
 
 ## Idea

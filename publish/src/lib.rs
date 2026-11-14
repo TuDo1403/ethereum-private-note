@@ -25,6 +25,10 @@ macro_rules! log {
 }
 
 const SWEEP_GAS: u64 = 21_000;
+/// After a sweep, keep the key if what stayed behind exceeds this many times what the sweep actually paid.
+/// A normal run leaves about one fee (the quote is ~2x the price paid); a retry with a doubled reserve about
+/// three; only a quote far above the real price (a broken or lying RPC) goes past this.
+const LEFTOVER_KEEP_RATIO: u64 = 4;
 /// Gas limits are the node's estimate plus 20 %.
 const GAS_MARGIN_PCT: u64 = 120;
 /// The funding request is (all gas limits + sweep) x max fee x this. The x2 covers fee moves while we
@@ -447,17 +451,18 @@ async fn run(
             () = interrupted() => Err("interrupted again during the sweep".to_string()),
         }
     } else {
-        Ok(U256::ZERO)
+        Ok((U256::ZERO, false))
     };
     // `sent` is set only once the funds have arrived.
     let funded = sent.get().is_some();
     // Once the funds have arrived and the sweep has finished, nothing more is expected at `sender` and
     // the key may be forgotten. In every other case `rescue` prints it when this function returns.
     // A zero balance after funding is no proof of a finished sweep (a lagging or lying RPC can say so):
-    // only a sweep that sent something lets the key go.
-    if funded && swept.as_ref().is_ok_and(|v| !v.is_zero()) {
+    // only a sweep that sent something lets the key go, and not one that left a recoverable amount.
+    if funded && swept.as_ref().is_ok_and(|(v, keep)| !v.is_zero() && !keep) {
         rescue.armed.set(false);
     }
+    let swept = swept.map(|(v, _)| v);
 
     // A deploy that was sent but not confirmed (timeout, Ctrl-C, RPC error) may still have been mined,
     // e.g. while the sweep was being prepared (the sweep then moved on to nonce 1). Then the record IS
@@ -650,7 +655,8 @@ fn bump((max_fee, tip): (u128, u128)) -> (u128, u128) {
 }
 
 /// Send everything above the sweep's own fee to `refund`; returns the wei sent (0 only when `sender` is
-/// empty). A non-zero balance that cannot be swept is an error, so the caller keeps (prints) the key.
+/// empty) and whether the key must still be kept because a recoverable amount stayed behind. A non-zero
+/// balance that cannot be swept is an error, so the caller keeps (prints) the key.
 ///
 /// The sweep must work even when the deploy is stuck in the mempool. So it uses the latest MINED nonce and
 /// balance (not the pending nonce, which would queue it behind the stuck deploy while its value counts on
@@ -668,7 +674,7 @@ async fn sweep(
     sent: (u128, u128),
     allow_high: bool,
     secrets: &[String],
-) -> Result<U256, String> {
+) -> Result<(U256, bool), String> {
     let mut floor = bump(sent);
     let mut reserve_mul = 1u64;
     let mut last = String::new();
@@ -718,7 +724,7 @@ async fn sweep(
         let reserve = U256::from(SWEEP_GAS) * U256::from(max_fee) * U256::from(reserve_mul);
         if balance.is_zero() {
             log!("nothing to sweep: {sender} is empty");
-            return Ok(U256::ZERO);
+            return Ok((U256::ZERO, false));
         }
         if balance <= reserve {
             // Not Ok(0): that would let the caller forget the only key to this balance.
@@ -756,13 +762,20 @@ async fn sweep(
         match mined(p, hash, sender, nonce).await {
             Ok(true) => {
                 log!("swept {} to {refund}", amount(value));
-                if let Ok(left) = p.get_balance(sender).latest().await {
-                    log!(
-                        "left at {sender}: {} (unused part of the sweep's fee reserve)",
-                        amount(left)
-                    );
-                }
-                return Ok(value);
+                // The reserve is sized from a quote, so a quote far above the real price leaves a large
+                // part of it behind. Report that, so the caller keeps the key; an unreadable balance is
+                // assumed to be such a case.
+                let keep_key = match p.get_balance(sender).latest().await {
+                    Ok(left) => {
+                        log!(
+                            "left at {sender}: {} (unused part of the sweep's fee reserve)",
+                            amount(left)
+                        );
+                        keep_leftover(balance, value, left)
+                    }
+                    Err(_) => true,
+                };
+                return Ok((value, keep_key));
             }
             Ok(false) => {
                 last = format!(
@@ -775,6 +788,13 @@ async fn sweep(
             }
         }
     }
+}
+
+/// Whether `left`, what stayed at the sender after a sweep of `value` from `balance`, is worth keeping the
+/// key for: more than `LEFTOVER_KEEP_RATIO` times the fee the sweep actually paid.
+fn keep_leftover(balance: U256, value: U256, left: U256) -> bool {
+    let paid = balance.saturating_sub(value).saturating_sub(left);
+    left > paid * U256::from(LEFTOVER_KEEP_RATIO)
 }
 
 /// Poll for the sweep's fate: Ok(true) mined and succeeded; Ok(false) reverted, or `nonce` was used by
@@ -891,6 +911,17 @@ mod tests {
         assert_eq!(bump((800, 80)), (900, 90));
         assert_eq!(bump((1, 1)), (2, 2)); // rounded up
         assert_eq!(bump((0, 0)), (0, 1)); // a zero tip still rises
+    }
+
+    #[test]
+    fn leftover_keeps_the_key_only_when_the_quote_was_far_too_high() {
+        let u = |n: u64| U256::from(n);
+        // Normal: quote = 2 x price, so reserve 200 pays 100 and 100 stays: not worth a printed key.
+        assert!(!keep_leftover(u(1_000), u(800), u(100)));
+        // Doubled retry reserve: about three fees stay.
+        assert!(!keep_leftover(u(1_000), u(700), u(225)));
+        // Quote 100 x price: 99 of every 100 reserve wei stay.
+        assert!(keep_leftover(u(10_000), u(0), u(9_900)));
     }
 
     /// A well-formed 2-of-2 record (passphrase and paper): 26 header bytes, 1 masked share, nonce, ciphertext.
