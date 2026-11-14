@@ -11,9 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.88"
 name = "serde_with_macros"
-version = "3.14.1"
+version = "3.24.0"
 authors = ["Jonas Bushart"]
 build = false
 include = [
@@ -114,7 +114,7 @@ name = "version_numbers"
 path = "tests/version_numbers.rs"
 
 [dependencies.darling]
-version = "0.21.0"
+version = "0.24.0"
 
 [dependencies.proc-macro2]
 version = "1.0.1"
@@ -123,7 +123,7 @@ version = "1.0.1"
 version = "1.0.0"
 
 [dependencies.syn]
-version = "2.0.0"
+version = "3.0.3"
 features = [
     "extra-traits",
     "full",
@@ -131,30 +131,36 @@ features = [
 ]
 
 [dev-dependencies.expect-test]
-version = "1.5.0"
+version = "1.5.1"
+
+[dev-dependencies.glob]
+version = "0.3.4"
 
 [dev-dependencies.pretty_assertions]
 version = "1.4.0"
 
+[dev-dependencies.regex]
+version = "1.13.1"
+features = ["std"]
+default-features = false
+
 [dev-dependencies.rustversion]
-version = "1.0.0"
+version = "1.0.23"
 
 [dev-dependencies.serde]
-version = "1.0.152"
+version = "1.0.229"
 features = ["derive"]
 
 [dev-dependencies.serde_json]
-version = "1.0.25"
+version = "1.0.151"
 
 [dev-dependencies.trybuild]
-version = "1.0.80"
-
-[dev-dependencies.version-sync]
-version = "0.9.1"
+version = "1.0.120"
 
 [lints.clippy]
 cloned_instead_of_copied = "warn"
 default_trait_access = "warn"
+disallowed_methods = "warn"
 doc_markdown = "warn"
 explicit_auto_deref = "allow"
 manual-unwrap-or-default = "allow"
@@ -167,6 +173,7 @@ trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 unused_extern_crates = "warn"
 unused_import_braces = "warn"
+unused_qualifications = "warn"
 variant_size_differences = "warn"
 
 [lints.rust.rust_2018_idioms]
@@ -176,10 +183,7 @@ priority = -1
 [lints.rust.unexpected_cfgs]
 level = "warn"
 priority = 0
-check-cfg = [
-    "cfg(tarpaulin)",
-    "cfg(tarpaulin_include)",
-]
+check-cfg = []
 
 [lints.rustdoc]
 missing_crate_level_docs = "warn"

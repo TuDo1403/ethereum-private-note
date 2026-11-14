@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [3.24.0] - 2026-09-26
+
+No changes.
+
+## [3.23.0] - 2026-09-07
+
+### Changed
+
+* Update `syn` and `darling` dependencies to use `syn` v3 (#992)
+* `serde_as` can now parse `cfg_attr(true, ...)` and `cfg_attr(false, ...)` (#995)
+    `true`/`false` are new literals as of Rust 1.88 but need to be parsed explicitly with the `syn` types.
+    This is used when emitting `schemars` annotations.
+
+## [3.22.0] - 2026-08-09
+
+No changes.
+
+## [3.21.0] - 2026-06-04
+
+No changes.
+
+## [3.20.0] - 2026-05-10
+
+No changes.
+
+## [3.19.0] - 2026-05-02
+
+No changes.
+
+## [3.18.0] - 2026-03-13
+
+### Changed
+
+* Bump MSRV to 1.88 due to the `darling` dependency
+
+## [3.17.0] - 2026-02-24
+
+### Fixed
+
+* Fix example for `SerializeDisplayAlt`.
+    Remove unsupported attributes from example.
+
+## [3.16.1] - 2025-11-27
+
+No changes.
+
+## [3.16.0] - 2025-11-14
+
+No changes.
+
+## [3.15.1] - 2025-10-21
+
+No changes.
+
+## [3.15.0] - 2025-10-03
+
+No changes.
+
 ## [3.14.1] - 2025-09-19
 
 ### Fixed

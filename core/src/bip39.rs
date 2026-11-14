@@ -56,7 +56,7 @@ pub fn share_from_words(words: &str) -> Result<[u8; 32], String> {
 
 /// The passphrase is the only low-entropy factor, and anyone holding enough other factors can test guesses
 /// against the public record offline, forever. So it is generated, never chosen by a person.
-/// 2048 = 2^11 divides 2^16, so masking 16 random bits down to 11 is unbiased; 7 words = 77 bits.
+/// 2048 = 2^11 divides 2^16, so masking 16 random bits down to 11 is unbiased; 12 words = 132 bits.
 pub fn new_passphrase(words: usize) -> String {
     let r = crate::os_random(2 * words);
     (0..words)
@@ -96,7 +96,7 @@ mod tests {
         );
         let seed = "legal winner thank year wave sausage worth useful legal winner thank yellow";
         assert_eq!(entropy_to_words(&words_to_entropy(seed).unwrap()), seed);
-        assert_eq!(new_passphrase(7).split(' ').count(), 7);
+        assert_eq!(new_passphrase(12).split(' ').count(), 12);
     }
 
     #[test]

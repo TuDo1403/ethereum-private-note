@@ -59,7 +59,7 @@ expect "Type your seed words"; secret $env(SEED)
 expect "Type them again"; secret $env(SEED)
 expect -re {Seed fingerprint: ([0-9a-f]{8})} { set fp $expect_out(1,string) }
 
-expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){7})} { set pass [join [words_of $expect_out(1,string)] " "] }
+expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){12})} { set pass [join [words_of $expect_out(1,string)] " "] }
 expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 
@@ -117,7 +117,7 @@ expect "offline and ready."; send "\r"
 expect "Type your seed words"; secret $env(SEED)
 expect "Type them again"; secret $env(SEED)
 expect -re {Seed fingerprint: ([0-9a-f]{8})} { set fp $expect_out(1,string) }
-expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){7})} { set pass [join [words_of $expect_out(1,string)] " "] }
+expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){12})} { set pass [join [words_of $expect_out(1,string)] " "] }
 expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 expect "Saved two PUBLIC files"
@@ -556,7 +556,7 @@ expect -re {credential id: (\S+)}
 expect "Type your seed words"; secret $env(SEED)
 expect "Type them again"; secret $env(SEED)
 expect -re {Seed fingerprint: ([0-9a-f]{8})} { set fp $expect_out(1,string) }
-expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){7})} { set pass [join [words_of $expect_out(1,string)] " "] }
+expect -re {passphrase:\r\n((?: +[0-9]+\. [a-z]+\r\n){12})} { set pass [join [words_of $expect_out(1,string)] " "] }
 expect "once it is written down"; send "\r"
 expect "passphrase: "; send "$pass\r"
 expect "Self-check passed: every combination of 2 opens the record."

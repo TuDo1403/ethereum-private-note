@@ -20,9 +20,9 @@
 )))]
 // Not needed for 2018 edition and conflicts with `rust_2018_idioms`
 #![doc(test(no_crate_inject))]
-#![doc(html_root_url = "https://docs.rs/serde_with_macros/3.14.1/")]
-// Tarpaulin does not work well with proc macros and marks most of the lines as uncovered.
-#![cfg(not(tarpaulin_include))]
+#![doc(html_root_url = "https://docs.rs/serde_with_macros/3.24.0/")]
+// FIXME: The darling 0.24.0 derives trigger this lint
+#![allow(unused_qualifications)]
 
 //! proc-macro extensions for [`serde_with`].
 //!
@@ -130,7 +130,7 @@ where
                     .iter_mut()
                     .map(|field| function(field).map_err(|err| err.with_span(&field)))
                     // turn the Err variant into the Some, such that we only collect errors
-                    .filter_map(std::result::Result::err)
+                    .filter_map(Result::err)
                     .collect();
                 if errors.is_empty() {
                     Ok(())
@@ -144,7 +144,7 @@ where
                     .iter_mut()
                     .map(|field| function(field).map_err(|err| err.with_span(&field)))
                     // turn the Err variant into the Some, such that we only collect errors
-                    .filter_map(std::result::Result::err)
+                    .filter_map(Result::err)
                     .collect();
                 if errors.is_empty() {
                     Ok(())
@@ -193,7 +193,7 @@ where
                 .iter_mut()
                 .map(|variant| apply_on_fields(&mut variant.fields, function))
                 // turn the Err variant into the Some, such that we only collect errors
-                .filter_map(std::result::Result::err),
+                .filter_map(Result::err),
         );
 
         if errors.is_empty() {
@@ -368,7 +368,7 @@ fn skip_serializing_none_add_attr_to_field(field: &mut Field) -> Result<(), Stri
 fn is_std_option(type_: &Type) -> bool {
     match type_ {
         Type::Array(_)
-        | Type::BareFn(_)
+        | Type::FnPtr(_)
         | Type::ImplTrait(_)
         | Type::Infer(_)
         | Type::Macro(_)
@@ -387,7 +387,11 @@ fn is_std_option(type_: &Type) -> bool {
             ..
         }) => is_std_option(elem),
 
-        Type::Path(syn::TypePath { qself: None, path }) => {
+        Type::Path(syn::TypePath {
+            qself: None,
+            path,
+            attrs: _,
+        }) => {
             (path.leading_colon.is_none()
                 && path.segments.len() == 1
                 && path.segments[0].ident == "Option")
@@ -456,7 +460,7 @@ fn field_has_attribute(field: &Field, namespace: &str, name: &str) -> bool {
 /// # Example
 ///
 /// ```rust,ignore
-/// use serde_with::{serde_as, DisplayFromStr, Map};
+/// use serde_with::{serde_as, BytesOrString, DisplayFromStr, Map};
 ///
 /// #[serde_as]
 /// #[derive(Serialize, Deserialize)]
@@ -465,8 +469,11 @@ fn field_has_attribute(field: &Field, namespace: &str, name: &str) -> bool {
 ///     #[serde_as(as = "_")]
 ///     a: u32,
 ///
-///     /// Serialize into String
-///     #[serde_as(as = "DisplayFromStr")]
+///     /// Serialize into String, deserialize from Bytes or String
+///     #[serde_as(
+///         serialize_as = "DisplayFromStr",
+///         deserialize_as = "BytesOrString"
+///     )]
 ///     b: u32,
 ///
 ///     /// Serialize into a map from String to String
@@ -589,8 +596,8 @@ fn field_has_attribute(field: &Field, namespace: &str, name: &str) -> bool {
 /// It will also work if the relevant derive is behind a `#[cfg_attr]` attribute
 /// and propagate the `#[cfg_attr]` to the various `#[schemars]` field attributes.
 ///
-/// [`serde_as`]: https://docs.rs/serde_with/3.14.1/serde_with/guide/index.html
-/// [re-exporting `serde_as`]: https://docs.rs/serde_with/3.14.1/serde_with/guide/serde_as/index.html#re-exporting-serde_as
+/// [`serde_as`]: https://docs.rs/serde_with/3.24.0/serde_with/guide/index.html
+/// [re-exporting `serde_as`]: https://docs.rs/serde_with/3.24.0/serde_with/guide/serde_as/index.html#re-exporting-serde_as
 #[proc_macro_attribute]
 pub fn serde_as(args: TokenStream, input: TokenStream) -> TokenStream {
     #[derive(FromMeta)]
@@ -857,9 +864,7 @@ fn replace_infer_type_with_type(to_replace: Type, replacement: &Type) -> Type {
             Type::Paren(inner)
         }
         Type::Path(mut inner) => {
-            if let Some(Pair::End(mut t)) | Some(Pair::Punctuated(mut t, _)) =
-                inner.path.segments.pop()
-            {
+            if let Some(mut t) = inner.path.segments.pop() {
                 t.arguments = match t.arguments {
                     PathArguments::None => PathArguments::None,
                     PathArguments::AngleBracketed(mut inner) => {
@@ -879,11 +884,10 @@ fn replace_infer_type_with_type(to_replace: Type, replacement: &Type) -> Type {
                         PathArguments::AngleBracketed(inner)
                     }
                     PathArguments::Parenthesized(mut inner) => {
-                        inner.inputs = inner
-                            .inputs
-                            .into_iter()
-                            .map(|type_| replace_infer_type_with_type(type_, replacement))
-                            .collect();
+                        inner.inputs.iter_mut().for_each(|named_arg| {
+                            named_arg.ty =
+                                replace_infer_type_with_type(named_arg.ty.clone(), replacement);
+                        });
                         inner.output = match inner.output {
                             ReturnType::Type(arrow, mut type_) => {
                                 *type_ = replace_infer_type_with_type(*type_, replacement);
@@ -969,7 +973,7 @@ fn has_type_embedded(type_: &Type, embedded_type: &syn::Ident) -> bool {
                             inner
                                 .inputs
                                 .iter()
-                                .any(|type_| has_type_embedded(type_, embedded_type))
+                                .any(|named_arg| has_type_embedded(&named_arg.ty, embedded_type))
                                 || match &inner.output {
                                     ReturnType::Type(_arrow, type_) => {
                                         has_type_embedded(type_, embedded_type)
@@ -1060,7 +1064,7 @@ fn has_type_embedded(type_: &Type, embedded_type: &syn::Ident) -> bool {
 /// [`Display`]: std::fmt::Display
 /// [`FromStr`]: std::str::FromStr
 /// [cargo-toml-rename]: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#renaming-dependencies-in-cargotoml
-/// [serde-as-crate]: https://docs.rs/serde_with/3.14.1/serde_with/guide/serde_as/index.html#re-exporting-serde_as
+/// [serde-as-crate]: https://docs.rs/serde_with/3.24.0/serde_with/guide/serde_as/index.html#re-exporting-serde_as
 /// [serde-crate]: https://serde.rs/container-attrs.html#crate
 #[proc_macro_derive(DeserializeFromStr, attributes(serde_with))]
 pub fn derive_deserialize_fromstr(item: TokenStream) -> TokenStream {
@@ -1087,21 +1091,21 @@ fn deserialize_fromstr(mut input: DeriveInput, serde_with_crate_path: Path) -> T
     let (de_impl_generics, ty_generics, where_clause) = split_with_de_lifetime(&input.generics);
     quote! {
         #[automatically_derived]
-        impl #de_impl_generics #serde_with_crate_path::serde::Deserialize<'de> for #ident #ty_generics #where_clause {
+        impl #de_impl_generics #serde_with_crate_path::__private__::Deserialize<'de> for #ident #ty_generics #where_clause {
             fn deserialize<__D>(deserializer: __D) -> #serde_with_crate_path::__private__::Result<Self, __D::Error>
             where
-                __D: #serde_with_crate_path::serde::Deserializer<'de>,
+                __D: #serde_with_crate_path::__private__::Deserializer<'de>,
             {
                 struct Helper<__S>(#serde_with_crate_path::__private__::PhantomData<__S>);
 
-                impl<'de, __S> #serde_with_crate_path::serde::de::Visitor<'de> for Helper<__S>
+                impl<'de, __S> #serde_with_crate_path::__private__::Visitor<'de> for Helper<__S>
                 where
                     __S: #serde_with_crate_path::__private__::FromStr,
                     <__S as #serde_with_crate_path::__private__::FromStr>::Err: #serde_with_crate_path::__private__::Display,
                 {
                     type Value = __S;
 
-                    fn expecting(&self, formatter: &mut #serde_with_crate_path::core::fmt::Formatter<'_>) -> #serde_with_crate_path::core::fmt::Result {
+                    fn expecting(&self, formatter: &mut #serde_with_crate_path::__private__::fmt::Formatter<'_>) -> #serde_with_crate_path::__private__::fmt::Result {
                         #serde_with_crate_path::__private__::Display::fmt("a string", formatter)
                     }
 
@@ -1110,9 +1114,9 @@ fn deserialize_fromstr(mut input: DeriveInput, serde_with_crate_path: Path) -> T
                         value: &str
                     ) -> #serde_with_crate_path::__private__::Result<Self::Value, __E>
                     where
-                        __E: #serde_with_crate_path::serde::de::Error,
+                        __E: #serde_with_crate_path::__private__::DeError,
                     {
-                        value.parse::<Self::Value>().map_err(#serde_with_crate_path::serde::de::Error::custom)
+                        value.parse::<Self::Value>().map_err(#serde_with_crate_path::__private__::DeError::custom)
                     }
 
                     fn visit_bytes<__E>(
@@ -1120,9 +1124,9 @@ fn deserialize_fromstr(mut input: DeriveInput, serde_with_crate_path: Path) -> T
                         value: &[u8]
                     ) -> #serde_with_crate_path::__private__::Result<Self::Value, __E>
                     where
-                        __E: #serde_with_crate_path::serde::de::Error,
+                        __E: #serde_with_crate_path::__private__::DeError,
                     {
-                        let utf8 = #serde_with_crate_path::core::str::from_utf8(value).map_err(#serde_with_crate_path::serde::de::Error::custom)?;
+                        let utf8 = #serde_with_crate_path::__private__::str::from_utf8(value).map_err(#serde_with_crate_path::__private__::DeError::custom)?;
                         self.visit_str(utf8)
                     }
                 }
@@ -1180,7 +1184,7 @@ fn deserialize_fromstr(mut input: DeriveInput, serde_with_crate_path: Path) -> T
 /// [`Display`]: std::fmt::Display
 /// [`FromStr`]: std::str::FromStr
 /// [cargo-toml-rename]: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#renaming-dependencies-in-cargotoml
-/// [serde-as-crate]: https://docs.rs/serde_with/3.14.1/serde_with/guide/serde_as/index.html#re-exporting-serde_as
+/// [serde-as-crate]: https://docs.rs/serde_with/3.24.0/serde_with/guide/serde_as/index.html#re-exporting-serde_as
 /// [serde-crate]: https://serde.rs/container-attrs.html#crate
 #[proc_macro_derive(SerializeDisplay, attributes(serde_with))]
 pub fn derive_serialize_display(item: TokenStream) -> TokenStream {
@@ -1234,7 +1238,6 @@ pub fn derive_serialize_display(item: TokenStream) -> TokenStream {
 /// use serde_with::{SerializeDisplayAlt, DeserializeFromStr};
 ///
 /// #[derive(Debug, Clone, SerializeDisplayAlt, DeserializeFromStr)]
-/// #[serde(transparent)]
 /// pub struct MyType(u32);
 ///
 /// impl fmt::Display for MyType {
@@ -1294,13 +1297,13 @@ fn serialize_display(
 
     quote! {
         #[automatically_derived]
-        impl #impl_generics #serde_with_crate_path::serde::Serialize for #ident #ty_generics #where_clause {
+        impl #impl_generics #serde_with_crate_path::__private__::Serialize for #ident #ty_generics #where_clause {
             fn serialize<__S>(
                 &self,
                 serializer: __S
             ) -> #serde_with_crate_path::__private__::Result<__S::Ok, __S::Error>
             where
-                __S: #serde_with_crate_path::serde::Serializer,
+                __S: #serde_with_crate_path::__private__::Serializer,
             {
                 serializer.collect_str(#collect_str_param)
             }

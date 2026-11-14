@@ -5,7 +5,7 @@ nothing**. The usual setup, and the one described below, is 2 of 3:
 
 | factor | what it is | where it lives |
 |--------|------------|----------------|
-| **passphrase** | 7 BIP39 words, generated for you (77 bits) | paper |
+| **passphrase** | 12 BIP39 words, generated for you (132 bits) | paper |
 | **YubiKey** | FIDO2 `hmac-secret` of a resident credential, unlocked by the key's PIN and a touch | the key |
 | **paper share** | 32 bytes written as 24 BIP39 words (looks like a seed, is not one) | paper |
 
@@ -79,7 +79,7 @@ record.
 
 Requirements:
 
-- **Rust 1.94** (the tested toolchain; edition 2024).
+- **Rust 1.100** (the tested toolchain; edition 2024).
 - **libfido2 command-line tools** (`fido2-token`, `fido2-cred`, `fido2-assert`), needed whenever the
   YubiKey is used:
   - macOS: `brew install libfido2`
@@ -230,7 +230,7 @@ N is depends on the setup:
    seed, because a typo that is another BIP39 word passes the checksum surprisingly often (1 in 16 for
    12 words). The **seed fingerprint** (8 hex digits, see `SPEC.md`) is shown; note it. Only the entropy
    is stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
-3. **Passphrase** (if the setup has one). Seven words are generated and shown once. Write them down in
+3. **Passphrase** (if the setup has one). Twelve words are generated and shown once. Write them down in
    lowercase, one space between words. The screen is cleared and you must type them back.
 4. **Build, check and save.** The YubiKey secrets were read at step 1; with a passphrase, Argon2id now
    stretches it (1 GiB, takes a while).
@@ -426,8 +426,10 @@ factors.
 ### The passphrase is the weakest link, so it is generated
 
 Anyone with the record and **one** of the paper share or the YubiKey (with its PIN) can test passphrase
-guesses offline, for as long as they like. That is why the passphrase is generated (7 random words,
-77 bits) and stretched with Argon2id at 1 GiB and 3 passes: brute force is far out of reach. Do not
+guesses offline, for as long as they like. That is why the passphrase is generated (12 random words,
+132 bits) and stretched with Argon2id at 1 GiB and 3 passes: brute force is far out of reach, even for a
+quantum computer (Grover's search at best halves the bits, to about 66). Backups made with the older
+7-word passphrase still restore. Do not
 replace it with something you chose, and do not shorten it.
 
 ### A leaked factor cannot be revoked

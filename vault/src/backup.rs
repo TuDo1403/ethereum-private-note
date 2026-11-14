@@ -379,9 +379,9 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
 
     // Generated, shown once, then proven.
     let pass = if has_pass {
-        let pass = Zeroizing::new(new_passphrase(7));
+        let pass = Zeroizing::new(new_passphrase(12));
         clear();
-        heading("Passphrase (7 generated words)", true);
+        heading("Passphrase (12 generated words)", true);
         println!("Write it on paper now, in lowercase, one space between words.");
         println!("Keep it apart from the other shares. It is NOT a wallet seed.\n");
         show_words("passphrase:", &pass);

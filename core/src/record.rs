@@ -253,7 +253,7 @@ pub fn seal(
     plain[1..1 + entropy.len()].copy_from_slice(entropy);
     let ct = cipher(&coeffs[0])
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::try_from(&nonce[..]).expect("12-byte nonce"),
             Payload {
                 msg: &plain,
                 aad: header,
@@ -317,7 +317,7 @@ pub fn unseal(record: &[u8], factors: &[Share]) -> Result<(Vec<u8>, Vec<u8>), St
             .map(|i| shares[i])
             .collect();
         let opened = cipher(&interpolate(&subset)).decrypt(
-            Nonce::from_slice(&record[nonce_at..nonce_at + NONCE]),
+            &Nonce::try_from(&record[nonce_at..nonce_at + NONCE]).expect("12-byte nonce"),
             Payload {
                 msg: &record[nonce_at + NONCE..],
                 aad: header,

@@ -18,7 +18,7 @@ use crate::prelude::*;
 /// This cannot work, since there is no way to tell the `Vec` to skip the inner `DoubleOption` if it is `None`.
 ///
 /// ```rust
-/// # #[cfg(any())] {
+/// # #[cfg(false)] {
 /// # struct Foobar {
 /// #[serde_as(as = "Vec<DoubleOption<_>>")]
 /// data: Vec<Option<Option<i32>>>,
@@ -182,7 +182,7 @@ pub mod unwrap_or_skip {
 /// The `_` is a placeholder which works for any type which implements [`Serialize`]/[`Deserialize`].
 ///
 /// ```rust
-/// # #[cfg(any())] {
+/// # #[cfg(false)] {
 /// #[serde_as]
 /// #[derive(Deserialize, Serialize)]
 /// struct A {
@@ -193,25 +193,26 @@ pub mod unwrap_or_skip {
 /// ```
 ///
 /// [`HashSet`]: std::collections::HashSet
-/// [`BTreeSet`]: std::collections::HashSet
+/// [`BTreeSet`]: std::collections::BTreeSet
 ///
 /// # Example
 ///
 /// ```rust
-/// # use std::collections::HashSet;
+/// # extern crate alloc;
+/// # use alloc::collections::BTreeSet;
 /// # use serde::Deserialize;
 /// #
 /// # #[derive(Debug, Eq, PartialEq)]
 /// #[derive(Deserialize)]
 /// struct Doc {
 ///     #[serde(with = "::serde_with::rust::sets_duplicate_value_is_error")]
-///     set: HashSet<usize>,
+///     set: BTreeSet<usize>,
 /// }
 ///
 /// // Sets are serialized normally,
 /// let s = r#"{"set": [1, 2, 3, 4]}"#;
 /// let v = Doc {
-///     set: HashSet::from_iter(vec![1, 2, 3, 4]),
+///     set: BTreeSet::from_iter(vec![1, 2, 3, 4]),
 /// };
 /// assert_eq!(v, serde_json::from_str(s).unwrap());
 ///
@@ -298,7 +299,7 @@ pub mod sets_duplicate_value_is_error {
 /// The `_` is a placeholder which works for any type which implements [`Serialize`]/[`Deserialize`].
 ///
 /// ```rust
-/// # #[cfg(any())] {
+/// # #[cfg(false)] {
 /// #[serde_as]
 /// #[derive(Deserialize, Serialize)]
 /// struct A {
@@ -309,25 +310,26 @@ pub mod sets_duplicate_value_is_error {
 /// ```
 ///
 /// [`HashMap`]: std::collections::HashMap
-/// [`BTreeMap`]: std::collections::HashMap
+/// [`BTreeMap`]: std::collections::BTreeMap
 ///
 /// # Example
 ///
 /// ```rust
+/// # extern crate alloc;
 /// # use serde::Deserialize;
-/// # use std::collections::HashMap;
+/// # use alloc::collections::BTreeMap;
 /// #
 /// # #[derive(Debug, Eq, PartialEq)]
 /// #[derive(Deserialize)]
 /// struct Doc {
 ///     #[serde(with = "::serde_with::rust::maps_duplicate_key_is_error")]
-///     map: HashMap<usize, usize>,
+///     map: BTreeMap<usize, usize>,
 /// }
 ///
 /// // Maps are serialized normally,
 /// let s = r#"{"map": {"1": 1, "2": 2, "3": 3}}"#;
 /// let mut v = Doc {
-///     map: HashMap::new(),
+///     map: BTreeMap::new(),
 /// };
 /// v.map.insert(1, 1);
 /// v.map.insert(2, 2);
@@ -418,7 +420,7 @@ pub mod maps_duplicate_key_is_error {
 /// The `_` is a placeholder which works for any type which implements [`Serialize`]/[`Deserialize`].
 ///
 /// ```rust
-/// # #[cfg(any())] {
+/// # #[cfg(false)] {
 /// #[serde_as]
 /// #[derive(Deserialize, Serialize)]
 /// struct A {
@@ -429,7 +431,7 @@ pub mod maps_duplicate_key_is_error {
 /// ```
 ///
 /// [`HashSet`]: std::collections::HashSet
-/// [`BTreeSet`]: std::collections::HashSet
+/// [`BTreeSet`]: std::collections::BTreeSet
 #[cfg(feature = "alloc")]
 pub mod sets_last_value_wins {
     use super::*;
@@ -498,7 +500,7 @@ pub mod sets_last_value_wins {
 /// The implementation supports both the [`HashMap`] and the [`BTreeMap`] from the standard library.
 ///
 /// [`HashMap`]: std::collections::HashMap
-/// [`BTreeMap`]: std::collections::HashMap
+/// [`BTreeMap`]: std::collections::BTreeMap
 ///
 /// # Converting to `serde_as`
 ///
@@ -506,7 +508,7 @@ pub mod sets_last_value_wins {
 /// The `_` is a placeholder which works for any type which implements [`Serialize`]/[`Deserialize`].
 ///
 /// ```rust
-/// # #[cfg(any())] {
+/// # #[cfg(false)] {
 /// #[serde_as]
 /// #[derive(Deserialize, Serialize)]
 /// struct A {
@@ -519,20 +521,21 @@ pub mod sets_last_value_wins {
 /// # Example
 ///
 /// ```rust
+/// # extern crate alloc;
 /// # use serde::Deserialize;
-/// # use std::collections::HashMap;
+/// # use alloc::collections::BTreeMap;
 /// #
 /// # #[derive(Debug, Eq, PartialEq)]
 /// #[derive(Deserialize)]
 /// struct Doc {
 ///     #[serde(with = "::serde_with::rust::maps_first_key_wins")]
-///     map: HashMap<usize, usize>,
+///     map: BTreeMap<usize, usize>,
 /// }
 ///
 /// // Maps are serialized normally,
 /// let s = r#"{"map": {"1": 1, "2": 2, "3": 3}}"#;
 /// let mut v = Doc {
-///     map: HashMap::new(),
+///     map: BTreeMap::new(),
 /// };
 /// v.map.insert(1, 1);
 /// v.map.insert(2, 2);
@@ -542,7 +545,7 @@ pub mod sets_last_value_wins {
 /// // but create an error if duplicate keys, like the `1`, exist.
 /// let s = r#"{"map": {"1": 1, "2": 2, "1": 3}}"#;
 /// let mut v = Doc {
-///     map: HashMap::new(),
+///     map: BTreeMap::new(),
 /// };
 /// v.map.insert(1, 1);
 /// v.map.insert(2, 2);

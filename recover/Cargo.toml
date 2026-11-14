@@ -2,7 +2,7 @@
 name = "epn-recover"
 version = "3.0.0"
 edition = "2024"
-rust-version = "1.94"  # the toolchain this was tested with, not a proven minimum
+rust-version = "1.100"  # the toolchain this was tested with, not a proven minimum
 
 publish = false
 
@@ -20,5 +20,5 @@ name = "recover"
 path = "src/main.rs"
 
 [dev-dependencies]
-base64ct = { version = "=1.6.0", features = ["alloc"] }
-serde_json = "=1.0.133"
+base64ct = { version = "=1.8.3", features = ["alloc"] }
+serde_json = "=1.0.154"
