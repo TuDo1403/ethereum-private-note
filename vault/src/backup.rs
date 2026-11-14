@@ -295,6 +295,18 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         // The places asked for here only score the setup: dropped at once, never saved.
         None => setup::choose()?.0,
     };
+    // --device names one path, so every key would be read there; several keys are plugged in one at a time.
+    let yubikeys = layout
+        .shares
+        .iter()
+        .filter(|s| s.kind == ShareKind::YubiKey)
+        .count();
+    if device.is_some() && yubikeys > 1 {
+        return Err(format!(
+            "--device names one key, but this setup has {yubikeys} YubiKeys: run it without --device, and \
+             plug in one key at a time when asked. Nothing was made."
+        ));
+    }
     let dir = output_dir()?;
 
     let (n, k) = (layout.n(), layout.k);
@@ -346,8 +358,8 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
     let mut creds: Vec<Option<String>> = vec![None; n];
     // Never reallocates: a move would leave an unwiped copy of a key's secret.
     let mut prfs: Shares = Zeroizing::new(Vec::with_capacity(keys.len()));
-    // Without --device the key is found by listing, which refuses to pick between two: one at a time.
-    let one_at_a_time = keys.len() > 1 && device.is_none();
+    // The key is found by listing, which refuses to pick between two: one at a time (--device was refused).
+    let one_at_a_time = keys.len() > 1;
     for (done, &i) in keys.iter().enumerate() {
         let x = i as u8 + 1;
         println!();

@@ -509,6 +509,14 @@ expect eof
 if {[llength [glob -nocomplain backup-*]] > 0} { fail "a folder was made for a refused setup file" }
 
 set f [open "$env(WORK)/setup.txt" w]; puts -nonewline $f $env(PLAN); close $f
+# --device names one key: refused for two YubiKeys, before any folder is made.
+spawn $env(VAULT) backup --device /dev/fake setup.txt
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+expect "Press Enter to use this setup"; send "\r"
+expect "this setup has 2 YubiKeys: run it without --device"
+expect eof
+if {[llength [glob -nocomplain backup-*]] > 0} { fail "a folder was made for a refused --device" }
+
 plug A
 spawn $env(VAULT) backup setup.txt
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
@@ -596,7 +604,10 @@ fn backup_two_keys_from_plan() {
     assert!(transcript.contains(&format!("FP={fp}")), "{transcript}");
     assert!(!transcript.contains("sausage"), "seed shown");
     // With several keys plugged in, backup and restore say to unplug one, never to use --device.
-    assert!(!transcript.contains("with --device"), "{transcript}");
+    assert!(
+        !transcript.contains("pick one with --device"),
+        "{transcript}"
+    );
     let dir = work.join(
         transcript
             .rsplit_once("DIR=")
