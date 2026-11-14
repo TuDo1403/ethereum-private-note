@@ -133,31 +133,40 @@ On the **offline** machine, with the YubiKey plugged in:
 ./vault backup --device PATH    # when several FIDO2 keys are plugged in (see `fido2-token -L`)
 ```
 
-`vault` refuses to run through a pipe; it needs a real terminal. It walks through six steps:
+`vault` refuses to run through a pipe; it needs a real terminal. Before asking for anything it creates
+the output folder `./backup-<timestamp>/` and checks that it can write there. Then it walks through six
+steps:
 
 1. **YubiKey.** Press Enter to create a new resident credential (PIN, then touch), or paste the
    credential id of one made earlier by `vault`. The id is not secret; it goes on the recovery sheet.
-2. **Seed.** Type your 12–24 seed words (hidden). The BIP39 checksum is verified. Only the entropy is
-   stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
+2. **Seed.** Type your 12–24 seed words (hidden), then type them again: both entries must give the same
+   seed, because a typo that is another BIP39 word passes the checksum surprisingly often (1 in 16 for
+   12 words). The **seed fingerprint** (8 hex digits, see `SPEC.md`) is shown; note it. Only the entropy
+   is stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
 3. **Passphrase.** Seven words are generated and shown once. Write them down in lowercase, one space
    between words. The screen is cleared and you must type them back.
-4. **Build and check.** PIN and touch again, then Argon2id (1 GiB, takes a while). Every pair of
-   factors is tried against the new record; if any pair fails, nothing is saved.
+4. **Build, check and save.** PIN and touch again, then Argon2id (1 GiB, takes a while). Every pair of
+   factors is tried against the new record; if any pair fails, nothing is saved. Then the two public
+   files, `record.hex` and `recovery-sheet.txt`, are written (and synced to disk) **before** share C is
+   shown, so a crash later cannot leave you with papers and no record. If writing fails, `vault` says
+   so: destroy the papers of that run and start again.
 5. **Share C.** 24 words are shown once. Write them on a *separate* paper and label it *"backup share,
-   not a wallet"*. You are quizzed on three of them.
-6. **Public files.** `./backup-<timestamp>/record.hex` and `./backup-<timestamp>/recovery-sheet.txt`
-   are written. Both are public.
+   not a wallet"*. Then type all 24 back (hidden); a mismatch shows share C again so you can correct the
+   paper.
+6. **Next steps** are printed: test the papers with a verify-only restore, publish the record, fill in
+   the recovery sheet.
 
-The recovery sheet holds the record, the credential id and blanks for the chain id and the record's address.
-Print it, together with `SPEC.md`.
+The recovery sheet holds the record id, the record, the seed fingerprint, the credential id and blanks
+for the chain id and the record's address. Print it, together with `SPEC.md`, and keep a copy of it (or
+of `record.hex` and these locators) in the storage place of every factor paper too.
 
 Then clear the terminal scrollback, and shut down the offline machine (or reboot the live OS).
 
 ## Publishing the record on chain
 
 On the **online** machine, copy only `record.hex` across (USB stick, QR, or retype it: it is public).
-`publish` pays from a throwaway key so the sending address is never tied to your seed, and it sweeps
-leftover ETH back.
+`vault` prints the command for it. `publish` pays from a throwaway key so the sending address is never
+tied to your seed, and it sweeps leftover ETH back.
 
 ```bash
 ./publish [--verify-rpc URL] [--confirmations N] [--allow-high-fees] <rpc-url> <record.hex> <refund-address>
@@ -169,7 +178,8 @@ Missing arguments are prompted for. What happens:
    URI are printed. Send that amount from your wallet (check the chain id in the wallet). It waits 15 min.
 2. The record is deployed as the code of a new contract and read back.
 3. Leftover ETH is swept to the refund address, on every exit after funding, including failures.
-4. Chain id and the record's address are printed. **Write them on the recovery sheet.**
+4. Chain id, the record's address and the record id are printed. **Write chain id and address on the
+   recovery sheet** (the record id must match the sheet's).
 
 Recommended flags:
 
@@ -191,15 +201,16 @@ The output must be `0x00` followed by the contents of `record.hex` (without its 
 
 ## Testing the backup
 
-**Do not trust a backup you have not restored.** On the offline machine, right after making it,
-restore with each of the three pairs:
+**Do not trust a backup you have not restored.** On the offline machine, right after making it, run
+`vault restore`, choose **2 (verify only)**, and restore with each of the three pairs:
 
 1. passphrase + YubiKey
 2. passphrase + share C
 3. YubiKey + share C
 
-`vault` already checked all three pairs against the in-memory values; this test checks what you
-actually **wrote on paper**. Compare the restored words to your seed, then clear the screen.
+Verify only prints the seed fingerprint instead of the seed, so a test never puts your seed on screen.
+It must equal the fingerprint on the recovery sheet. `vault` already checked all three pairs against
+the in-memory values; this test checks what you actually **wrote on paper**.
 
 Repeat a test every year or so, and whenever you move a factor, to find a smudged paper or a dead
 YubiKey while you still have the other two.
@@ -215,32 +226,29 @@ the seed is printed on screen.
 ./vault restore [--device PATH]
 ```
 
-Paste the record hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies
-the credential id). Say which factors you have; the YubiKey is asked first so a missing key or wrong
-PIN fails before you type anything. Share C is entered word by word, the passphrase hidden. Three
-attempts.
+Choose 1 to show the seed or 2 to verify only (seed fingerprint, never the seed). Paste the record
+hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the credential id).
+Say which factors you have; the YubiKey is asked first so a missing key or wrong PIN fails before you
+type anything. Share C is entered word by word, the passphrase hidden. Three attempts. This is the
+normal way to restore: every secret is read at a hidden prompt.
 
 ### Scripted: `recover restore` (v1)
 
 `recover` is deliberately tiny and reads secrets **only from stdin**, never from arguments, so they do
-not land in shell history or `ps`.
+not land in `ps`. stdin line 1 is share C (24 words, or empty), the rest is the passphrase (or empty).
+Pass `--cred-id` to use the YubiKey. Read the secrets at hidden prompts:
 
 ```bash
-./recover restore <record-hex> [--cred-id ID [--device PATH]]
+IFS= read -rs C; IFS= read -rs P; printf '%s\n%s' "$C" "$P" | ./recover restore <record-hex> [--cred-id ID [--device PATH]]; unset C P
 ```
 
-stdin line 1 is share C (24 words, or empty), the rest is the passphrase (or empty). Pass `--cred-id`
-to use the YubiKey. For example, typing interactively (input is visible, so mind the screen):
-
-```bash
-./recover restore 0x01... --cred-id <credential-id>
-```
-
-then type the share C words, Enter, leave the passphrase line empty, Enter, and Ctrl-D. Exactly one
-trailing newline is stripped from the passphrase; nothing else is trimmed.
+then type the share C words, Enter, the passphrase (or nothing), Enter. Nothing is shown. **Never type
+the words or the passphrase into the command line itself** (for example inside `printf`): your shell
+saves the whole line in its history file. Exactly one trailing `\n` or `\r\n` is stripped from the
+passphrase; nothing else is trimmed. Share C is checked before the YubiKey prompt and before Argon2.
 
 The seed words go to stdout, the factors used to stderr. Exit code 0 is success, 1 is a failed
-restore, 2 is a usage error. Errors never echo what you typed.
+restore, 2 is a usage error. Errors never echo what you typed; a bad word is reported by its position.
 
 If the recovery sheet is lost, the credential id can be listed from the key with its PIN:
 
@@ -256,7 +264,8 @@ Records whose first byte is `02` are restored with:
 ./recover restore <record-hex> [--key X=CRED_ID]... [--device PATH] < factors
 ```
 
-with one factor per line in `factors` (or typed on stdin):
+with one factor per line, typed on stdin after running the command alone (end with Ctrl-D; input is
+visible, so mind the screen, but it never reaches shell history):
 
 ```
 pass <passphrase>        the passphrase: everything after the first space, not trimmed
@@ -328,8 +337,9 @@ passphrase and the YubiKey.
   hibernation off, avoids leaving copies on disk.
 - Keep secrets out of anything that records the terminal: scrollback, screen recording, tmux logs,
   shell history, clipboard managers, screenshots syncing to the cloud. Clear the terminal afterwards.
-- Never pass secrets as command-line arguments or `export` them in a shell whose history is saved.
-  `recover` takes them on stdin for this reason.
+- Never put secrets in a command line (as arguments, or inside a `printf ... | recover` pipeline) or
+  `export` them in a shell whose history is saved. `recover` takes them on stdin for this reason; read
+  them with `read -rs` as shown above, or use `vault restore`.
 - Build from this repository's vendored sources (`--offline --locked`) on a machine you trust, and
   check you are running the binary you built.
 
@@ -350,8 +360,9 @@ with `cast code` against a node you trust before relying on it.
 
 ### Long-term recoverability
 
-- Keep the record in several places besides the chain: the recovery sheet, email, cloud storage.
-  Reading it from the chain needs the chain id and the record's address, which no factor can regenerate.
+- Keep the record in several places besides the chain: the recovery sheet, email, cloud storage, and
+  with each factor paper. Reading it from the chain needs the chain id and the record's address, which
+  no factor can regenerate.
 - Keep `SPEC.md` printed with share C, and keep a copy of this repository (with `vendor/`) somewhere
   durable. `recover` builds offline from it.
 - v1 records stay valid forever; a future format must change the version byte.

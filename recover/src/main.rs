@@ -2,11 +2,14 @@ use epn_core::*;
 use std::io::Read;
 
 // Restore only. Secrets (share C, passphrase) come from stdin, never from arguments, so none of them
-// lands in shell history or `ps`. The record, credential id and device path are public.
-const USAGE: &str = "usage:
-  printf '%s\\n%s' \"$SHARE_C_WORDS\" \"$PASS\" | recover restore <record-hex> [--cred-id ID [--device PATH]]
-stdin line 1 is share C, the rest is the passphrase; leave either empty to omit it. Pass --cred-id to
-use the YubiKey. Any two of the three factors restore the seed. Backups are made with `vault`.
+// lands in `ps`. The usage shows them read at hidden prompts: a secret typed into a command line, even
+// inside a printf, is saved in shell history. The record, credential id and device path are public.
+const USAGE: &str = "usage (v1 records; the guided `vault restore` with hidden prompts is the normal way):
+  IFS= read -rs C; IFS= read -rs P; printf '%s\\n%s' \"$C\" \"$P\" | recover restore <record-hex> [--cred-id ID [--device PATH]]; unset C P
+then type share C, Enter, the passphrase, Enter (nothing is shown). Never type a secret into a command
+line: shell history keeps it. stdin line 1 is share C, the rest is the passphrase; leave either empty to
+omit it. Pass --cred-id to use the YubiKey. Any two of the three factors restore the seed. Backups are
+made with `vault`.
 
 v2 records (k-of-n, first byte 02):
   recover restore <record-hex> [--key X=CRED_ID]... [--device PATH]  < factors
@@ -66,9 +69,12 @@ fn cmd_restore(mut args: Vec<String>) -> Result<(), Fail> {
     let Some((share_c, pass)) = input.split_once('\n') else {
         return Err(Fail::Usage("stdin must be share C words (or empty), a newline, then the passphrase (or empty)".into()));
     };
-    // `echo` appends a newline that is not part of the passphrase; strip exactly one.
-    let pass = pass.strip_suffix('\n').unwrap_or(pass);
+    // `echo` appends a newline that is not part of the passphrase; strip exactly one, with the `\r` a
+    // Windows-style line ending puts before it (as `lines()` does for v2).
+    let pass = pass.strip_suffix('\n').map_or(pass, |p| p.strip_suffix('\r').unwrap_or(p));
     let record = unhex(record_hex)?;
+    // Every cheap check (share C words, two factors, Argon2 cost) before the YubiKey prompt and Argon2.
+    check_factors(&record, non_empty(pass).is_some(), cred_id.is_some(), non_empty(share_c.trim()))?;
 
     let prf = match &cred_id {
         Some(id) => {

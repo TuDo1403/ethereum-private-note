@@ -1,5 +1,7 @@
 use epn_core::v2::*;
 use epn_core::{check_argon_cost, derive_pad_a, entropy_to_words, os_random, unhex, words_to_entropy};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
 use serde_json::{json, Value};
 
 fn hex(b: &[u8]) -> String {
@@ -27,7 +29,7 @@ fn arr(v: &Value) -> [u8; 32] {
 type Spec = (&'static str, u32, u8, usize, &'static [Kind], &'static str, &'static str, u8, u8);
 use Kind::{Hardware as H, Paper as P, Passphrase as S};
 
-const SPECS: [Spec; 7] = [
+const SPECS: [Spec; 10] = [
     ("fast-2-of-3-12-words", 1024, 1, 2, &[S, H, P], "correct horse battery staple", "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f", 0x03, 0x40),
     (
         "fast-3-of-5-24-words-unicode-passphrase",
@@ -46,7 +48,47 @@ const SPECS: [Spec; 7] = [
     ("fast-4-of-5-24-bytes", 1024, 1, 4, &[S, H, H, P, P], "correct horse battery staple", "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a", 0x09, 0x70),
     ("fast-5-of-5-20-bytes", 1024, 1, 5, &[S, H, H, P, P], "correct horse battery staple", "000102030405060708090a0b0c0d0e0f10111213", 0x0b, 0x80),
     ("fast-3-of-4-all-paper", 1024, 1, 3, &[P, P, P, P], "", "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5", 0x0d, 0x90),
+    // Layout pins: masked shares are stored in increasing x with paper shares skipped, and a pad's label
+    // is the share's x, not its position among masked shares (here the passphrase is x=3, stored first
+    // or second). The last record holds only hardware shares.
+    ("fast-2-of-3-paper-first-passphrase-last", 1024, 1, 2, &[P, H, S], "correct horse battery staple", "0123456789abcdef0123456789abcdef", 0x0f, 0xa0),
+    ("fast-3-of-4-paper-between-on-chain-28-bytes", 1024, 1, 3, &[H, P, S, P], "correct horse battery staple", "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafb", 0x11, 0xb0),
+    ("fast-2-of-3-hardware-only", 1024, 1, 2, &[H, H, H], "", "fedcba9876543210fedcba9876543210", 0x13, 0xc0),
 ];
+
+/// Records every decoder must refuse, made from the first vector, each with that vector's factors
+/// (pads of on-chain shares, paper shares) so the refusal cannot be "too few factors". `error` is text
+/// the reference implementation's error contains; another implementation only has to refuse.
+fn invalid_vectors(record: &[u8], factors: &[(u8, [u8; 32])], random: &[u8]) -> Vec<Value> {
+    let mut two_pass = record.to_vec();
+    two_pass[25] = Kind::Passphrase as u8; // kinds become passphrase, passphrase, paper: same length
+    let mut big_m = record.to_vec();
+    big_m[1..5].copy_from_slice(&((1u32 << 21) + 1).to_be_bytes());
+    let long = [record, &[0]].concat();
+    // Same key (the first 32 random bytes) and nonce, the plaintext with its last padding byte set: it
+    // authenticates, so only the padding check refuses it.
+    let h = parse_header(record).unwrap();
+    let nonce_at = record.len() - 12 - 49;
+    let mut plain = [0u8; 33];
+    plain[0] = 16;
+    plain[1..17].copy_from_slice(&unhex("7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f").unwrap());
+    plain[32] = 1;
+    let ct = Aes256Gcm::new_from_slice(&random[..32])
+        .unwrap()
+        .encrypt(Nonce::from_slice(&record[nonce_at..nonce_at + 12]), Payload { msg: &plain, aad: &record[..h.len()] })
+        .unwrap();
+    let padded = [&record[..nonce_at + 12], &ct[..]].concat();
+    let factors: Vec<Value> = factors.iter().map(|(x, v)| json!({"x": x, "value": hex(v)})).collect();
+    [
+        ("invalid-two-passphrase-shares", two_pass, "at most one passphrase share"),
+        ("invalid-argon2-m-above-cap", big_m, "refusing"),
+        ("invalid-length-one-byte-extra", long, "expected 152 bytes"),
+        ("invalid-nonzero-plaintext-padding", padded, "malformed plaintext"),
+    ]
+    .into_iter()
+    .map(|(name, record, error)| json!({"name": name, "error": error, "record": hex(&record), "factors": factors}))
+    .collect()
+}
 
 /// Everything in a vector is derived from the Spec by the code under test, so regenerating is only
 /// meaningful when the format changes on purpose. Run:
@@ -55,6 +97,7 @@ const SPECS: [Spec; 7] = [
 #[ignore]
 fn generate() {
     let mut out = Vec::new();
+    let mut invalid = Vec::new();
     for (name, m, t, k, kinds, passphrase, entropy, rnd, hw) in SPECS {
         let header = new_header(m, t, &pattern(0xa0, 1, 16), k, kinds).unwrap();
         let has_pass = kinds.contains(&S);
@@ -89,18 +132,54 @@ fn generate() {
                 }
             });
         }
+        if invalid.is_empty() {
+            let factors: Vec<_> = pads.iter().chain(&paper).copied().collect();
+            invalid = invalid_vectors(&record, &factors, &random);
+        }
         out.push(json!({
             "name": name, "k": k, "passphrase": passphrase, "mnemonic": entropy_to_words(&entropy),
             "entropy": hex(&entropy), "header": hex(&header), "random": hex(&random),
             "argon2id_out": has_pass.then(|| hex(&argon)), "shares": shares, "record": hex(&record),
         }));
     }
+    out.extend(invalid);
     std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/../vectors-v2.json"), serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
 }
 
-fn vectors() -> Vec<Value> {
+/// The valid vectors, then (with `error`) the records that must be refused.
+fn all_vectors() -> Vec<Value> {
     // Read at run time, not include_str!, so `generate` can build before the file exists.
     serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../vectors-v2.json")).unwrap()).unwrap()
+}
+
+fn vectors() -> Vec<Value> {
+    all_vectors().into_iter().filter(|v| v.get("error").is_none()).collect()
+}
+
+#[test]
+fn refuses_every_invalid_vector() {
+    let invalid: Vec<Value> = all_vectors().into_iter().filter(|v| v.get("error").is_some()).collect();
+    assert_eq!(invalid.len(), 4);
+    for v in &invalid {
+        let name = v["name"].as_str().unwrap();
+        let record = unhex(v["record"].as_str().unwrap()).unwrap();
+        let factors: Vec<(u8, [u8; 32])> =
+            v["factors"].as_array().unwrap().iter().map(|f| (f["x"].as_u64().unwrap() as u8, arr(&f["value"]))).collect();
+        let e = unseal(&record, &factors).unwrap_err();
+        assert!(e.contains(v["error"].as_str().unwrap()), "{name}: {e}");
+        // The user-facing path refuses too, before any slow work.
+        assert!(restore(&record, None, &[], &[]).is_err(), "{name}");
+    }
+    // Rebuilt from the first vector, so the data cannot drift from the code that judges it.
+    let v = &vectors()[0];
+    let record = unhex(v["record"].as_str().unwrap()).unwrap();
+    let factors: Vec<(u8, [u8; 32])> = v["shares"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["x"].as_u64().unwrap() as u8, arr(if s["kind"] == "paper" { &s["share"] } else { &s["pad"] })))
+        .collect();
+    assert_eq!(invalid_vectors(&record, &factors, &unhex(v["random"].as_str().unwrap()).unwrap()), invalid);
 }
 
 #[test]

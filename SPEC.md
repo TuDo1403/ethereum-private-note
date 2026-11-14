@@ -34,9 +34,12 @@ value is 3), and refuse anything else before allocating or hashing.
 - **padB** = HKDF(`prf`, info `"bk1/B"` `||` header), where `prf` is a 32-byte secret from the YubiKey: the
   CTAP2 hmac-secret output of a resident credential with rpId `localhost`, with salt =
   SHA-256(`"WebAuthn PRF"` `||` 0x00 `||` `"bk1"`) (the same salt a browser derives for WebAuthn PRF input
-  `"bk1"`). The `recover` tool gets it through libfido2's command-line tools; the PIN and a touch are
-  required. The record does not say where `prf` came from, so any reproducible 32-byte secret works the
-  same way. Not needed when you hold the other two.
+  `"bk1"`). `vault` and `recover` get it through libfido2's command-line tools; the PIN and a touch are
+  required. **User verification (the PIN) is part of the definition**: CTAP2 hmac-secret keeps two
+  secrets per credential, one for assertions with user verification and one without, so the same key
+  and salt give a different `prf` (and a useless factor B) if UV is skipped. Always assert with UV.
+  The record does not say where `prf` came from, so any reproducible 32-byte secret works the same way.
+  Not needed when you hold the other two.
 - **share C** = 32 bytes written as 24 BIP39 English words (standard entropy-to-words encoding).
 
 HKDF is HKDF-SHA256 with a salt of 32 zero bytes, 32-byte output. The header (22 bytes, with the random
@@ -55,7 +58,10 @@ From two shares (x1,y1), (x2,y2): `L = (y1 xor y2) / (x1 xor x2)`, then `K = y1 
 ## Seed
 
 `plaintext` = AES-256-GCM-decrypt(key = `K`, nonce, ct, AAD = `header`), 33 bytes:
-byte 0 is the entropy length (16, 20, 24, 28 or 32), then the entropy zero-padded to 32 bytes.
+byte 0 is the entropy length (16, 20, 24, 28 or 32), then the entropy zero-padded to 32 bytes. The
+padding **must** be zero: a decoder refuses a plaintext whose length byte is not one of those five or
+whose padding bytes are not all zero, even though it authenticated, so each seed has exactly one valid
+plaintext. This applies to v1 and v2.
 The entropy is the BIP39 entropy of the seed words (checksum words are recomputed, not stored).
 The BIP39 passphrase ("25th word") is not part of this backup.
 
@@ -77,21 +83,54 @@ no ABI, no deployed helper contract.
 The record is public by design, so keep copies anywhere: its hex printed with share C, email, cloud.
 The chain is one durable copy, not the only one. Reading the chain copy needs three public values that
 no factor can regenerate: the chain id and the address of the contract whose code holds the record
-(see "On-chain storage"). Write them next to share C.
+(see "On-chain storage"). Write them on the recovery sheet after publishing, and keep a copy of the
+record (or the sheet) with these locators in the storage place of every factor, so any two factors
+arrive with what they need.
 
-Using the YubiKey also needs its credential id (base64, printed by `recover enroll` and on the recovery
+Using the YubiKey also needs its credential id (base64, printed by `vault backup` and on the recovery
 sheet). It is not secret and is useless without the key. If the sheet is lost it can be listed from the
 key with its PIN: `fido2-token -L -k localhost <device>`.
 
+## Short identifiers (both formats)
+
+- **record id** = the first 8 bytes of SHA-256 over the whole record, as 16 hex digits. A short name
+  for one record; `vault` writes it on the recovery sheet and `publish` prints it after storing.
+- **seed fingerprint** = the first 4 bytes of SHA-256 over the seed entropy (the bytes the plaintext
+  carries, not the words), as 8 hex digits. `vault` shows it when the seed is entered, writes it on the
+  recovery sheet, and a verify-only restore prints it instead of the seed. It does not reduce security
+  meaningfully: it is 32 bits of a hash, so even a 128-bit seed keeps 96 bits that an attacker holding
+  the fingerprint must still search. Its job is to catch a wrong seed (a typo that still passes the
+  BIP39 checksum) without ever showing the seed.
+
+## Restoring with `recover` (v1)
+
+The normal way is `vault restore`: it reads every secret at a hidden prompt on the terminal. `recover`
+is the small scriptable tool; it reads secrets only from stdin (line 1 share C, the rest the passphrase;
+either may be empty) and never from arguments:
+
+    IFS= read -rs C; IFS= read -rs P; printf '%s\n%s' "$C" "$P" | recover restore <record-hex> [--cred-id ID [--device PATH]]; unset C P
+
+then type share C, Enter, the passphrase, Enter; nothing is shown. **Never type a secret into the
+command line itself** (for example `printf '%s\n%s' "word word ..." "pass" | recover ...`): the shell
+saves the whole line, secrets included, in its history file. `read -rs` keeps them out of history and
+off the screen, and `unset` drops them from the shell afterwards. Exactly one trailing `\n` or `\r\n` is
+removed from the passphrase; nothing else is trimmed. Share C words and the number of factors are
+checked before the YubiKey is asked for its PIN and before Argon2 starts. Errors name a word's position,
+never its text.
+
 ## Operating rules
 
-- The passphrase is generated by `recover backup` (7 random BIP39 words, 77 bits), never chosen. It is
+- The passphrase is generated by `vault backup` (7 random BIP39 words, 77 bits), never chosen. It is
   the only low-entropy factor: anyone holding share C or the YubiKey (and its PIN) can test passphrase
   guesses against the public record offline, forever.
 - The record is write-once and can never be deleted. If any one factor leaks, a new backup does not
   help, because the old record stays attackable: move the funds to a new seed.
-- Run `recover backup` on an offline machine. Every secret goes in through stdin and comes out on the
-  terminal, so also keep it out of anything that records the terminal.
+- Run `vault backup` on an offline machine. `vault` reads every secret from the terminal with echo off
+  (hidden prompts) and shows the generated ones on the terminal, so keep it out of anything that records
+  the terminal. The seed is typed twice and both entries must give the same entropy; share C is typed
+  back in full (24 words) before the backup counts as made.
+- Test the papers right after a backup with `vault restore`, option "verify only": it prints the seed
+  fingerprint, never the seed, and must match the one on the recovery sheet.
 - Keep the YubiKey apart from share C. Its PIN is the only thing between a thief of the key and factor B.
 
 A future format must change the version byte. Version 2 is below; version 1 records stay valid forever.
@@ -137,6 +176,15 @@ invalid. Presets: 2-of-3 (passphrase, YubiKey, paper) is 152 bytes; 3-of-5 (pass
 two paper) is 186 bytes. A share's masked bytes start at `24 + n + 32*(number of on-chain shares with a
 smaller x)`.
 
+Layout rules, all pinned by vectors:
+
+- Kinds may come in any order: a paper share may have a smaller x than on-chain shares, sit between them,
+  or come last, and the passphrase share may be at any x. Masked shares are stored in increasing x with
+  paper shares simply skipped, so a share's position among the masked shares is not its x.
+- A pad's label is the share's **x**, never its position among the masked shares (see "Pads").
+- A record may have no passphrase share (hardware and paper only, or hardware only) or no on-chain
+  share at all (all paper).
+
 k, n and every kind are in the AAD, and the pads depend on the header too, so changing any header byte
 (even to another valid value) makes decryption fail. Everything in the header is untrusted input:
 validate it (version, k/n range, kinds, one passphrase, exact length) before spending seconds on Argon2.
@@ -145,15 +193,16 @@ validate it (version, k/n range, kinds, one passphrase, exact length) before spe
 
 - `argon` = Argon2id exactly as for v1 padA (parallelism 1, v1.3, 32 bytes, password = UTF-8 of the
   passphrase after NFKD, no trimming) with `m`, `t`, salt from the header.
-- Pad of the on-chain share at x = HKDF(secret, info `"bk2/"` `||` ASCII digit of x `||` header), where
+- Pad of the on-chain share at x = HKDF(secret, info `"bk2/"` `||` ASCII digit of x `||` header) (x is
+  the share's x from the header, 1..n, not its index among the masked shares), where
   secret is `argon` for the passphrase share and the 32-byte hardware secret for a hardware share. HKDF
   is as in v1 (SHA-256, salt of 32 zero bytes, 32-byte output).
 - The label makes pads differ per share even if two secrets are equal; the header (with its random salt)
   makes them differ per record, which matters because a hardware secret is the same for every record.
   The version in `bk2` keeps v1 and v2 pads apart.
 - Hardware secret: any reproducible 32-byte secret. The tools here use the FIDO2 hmac-secret of a
-  credential with rpId `localhost` and the salt of v1 (see "Factors"); each YubiKey has its own
-  credential, and the x it was enrolled for is printed with its credential id.
+  credential with rpId `localhost`, the salt of v1 and user verification required (see "Factors");
+  each YubiKey has its own credential, and the x it was enrolled for is printed with its credential id.
 
 ## Shares
 
@@ -169,6 +218,24 @@ multiplication by `a^254`. With k = 2 this is the v1 formula.
 
 Sealing draws randomness in this order: K (32), C1 (32) .. C(k-1) (32), nonce (12). The test vectors
 fix these bytes, which is how they reproduce the record exactly.
+
+## Test vectors
+
+`vectors-v2.json` is an array. Entries without an `error` field are valid records with every input and
+intermediate value; besides the presets they pin the layout rules above (paper share before the
+on-chain ones, passphrase at x = 3, paper between on-chain shares, a hardware-only record). Entries with
+an `error` field are records a decoder **must refuse**, given with the factors (`x`, and `value`: the pad
+of an on-chain share or the paper share itself) that open the valid record they were made from:
+
+| name | why it is refused |
+|------|-------------------|
+| `invalid-two-passphrase-shares` | two shares of kind 01 |
+| `invalid-argon2-m-above-cap` | `m` = 2^21 + 1 KiB |
+| `invalid-length-one-byte-extra` | one byte longer than its header allows |
+| `invalid-nonzero-plaintext-padding` | authenticates, but a padding byte of the plaintext is not zero |
+
+`error` is text the reference implementation's error message contains; another implementation only
+has to refuse.
 
 ## Restoring
 
@@ -186,7 +253,10 @@ is refused.
 
 ## `recover restore` for v2
 
-The tool picks the format from the record's first byte. v1 arguments and stdin are unchanged (above).
+The tool picks the format from the record's first byte. v1 arguments and stdin are described in
+"Restoring with `recover` (v1)" above. The same warning holds here: run the command alone and type the
+factor lines into its stdin, then Ctrl-D (they reach the program, not shell history, but they are
+visible on screen), and never put a factor inside a command line.
 
     recover restore <record-hex> [--key X=CRED_ID]... [--device PATH]   < factors
 

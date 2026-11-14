@@ -64,8 +64,47 @@ pub fn enroll(device: Option<&str>) -> Result<String, String> {
     let user_id = Base64::encode_string(&crate::os_random(16));
     let input = format!("{}\n{RP_ID}\nbackup\n{user_id}\n", client_data_hash());
     let out = run("fido2-cred", &["-M", "-h", "-r", "-v", &dev], &input)?;
-    // Output: client data hash, rp id, format, authenticator data, credential id, signature, ...
-    out.lines().nth(4).map(str::to_string).ok_or_else(|| "fido2-cred printed no credential id".to_string())
+    parse_cred(&out)
+}
+
+/// Non-empty base64 on line `i`, or an error naming the tool.
+fn b64_line(lines: &[&str], i: usize, tool: &str) -> Result<Vec<u8>, String> {
+    Base64::decode_vec(lines[i]).ok().filter(|b| !b.is_empty()).ok_or(format!("{tool}: unexpected output (line {})", i + 1))
+}
+
+/// `fido2-cred -M` output (fido2-cred(1)): client data hash, rp id, attestation format, authenticator
+/// data, credential id, attestation signature, then the attestation certificate when there is one.
+/// Checked line by line, so output of another shape is refused instead of a wrong line taken as the id.
+fn parse_cred(out: &str) -> Result<String, String> {
+    let lines: Vec<&str> = out.lines().collect();
+    let tool = "fido2-cred";
+    if !(6..=7).contains(&lines.len()) || lines[0] != client_data_hash() || lines[1] != RP_ID || lines[2].is_empty() {
+        return Err(format!("{tool}: unexpected output (not a credential for {RP_ID})"));
+    }
+    for i in [3, 4, 5].into_iter().chain((lines.len() == 7).then_some(6)) {
+        b64_line(&lines, i, tool)?;
+    }
+    Ok(lines[4].to_string())
+}
+
+/// `fido2-assert -G` output for one non-resident assertion without `-b` (fido2-assert(1)): exactly
+/// client data hash, rp id, authenticator data, signature, hmac-secret. The strict shape matters: a
+/// one-line output would otherwise make the echoed client data hash (32 zero bytes) look like a secret.
+fn parse_assert(out: &str) -> Result<[u8; 32], String> {
+    let lines: Vec<&str> = out.lines().collect();
+    let tool = "fido2-assert";
+    if lines.len() != 5 || lines[0] != client_data_hash() || lines[1] != RP_ID {
+        return Err(format!("{tool}: unexpected output (expected one assertion for {RP_ID} with hmac-secret)"));
+    }
+    b64_line(&lines, 2, tool)?;
+    b64_line(&lines, 3, tool)?;
+    let secret = <[u8; 32]>::try_from(b64_line(&lines, 4, tool)?)
+        .map_err(|_| format!("{tool} returned no 32-byte hmac-secret (credential made without hmac-secret?)"))?;
+    // A real hmac-secret output is an HMAC-SHA-256; all zeros means something else was parsed.
+    if secret == [0; 32] {
+        return Err(format!("{tool} returned an all-zero hmac-secret; refusing it"));
+    }
+    Ok(secret)
 }
 
 /// The key's 32-byte hmac-secret for this credential: PIN and touch required.
@@ -74,11 +113,60 @@ pub fn secret(cred_id: &str, device: Option<&str>) -> Result<[u8; 32], String> {
     Base64::decode_vec(cred_id).map_err(|_| "credential id is not valid base64".to_string())?;
     let dev = device_path(device)?;
     let input = format!("{}\n{RP_ID}\n{cred_id}\n{}\n", client_data_hash(), Base64::encode_string(&salt()));
+    // -v: user verification (PIN). Required, not optional: CTAP2 hmac-secret keeps separate secrets for
+    // assertions with and without UV, so dropping -v would silently give a different factor B.
     let out = run("fido2-assert", &["-G", "-h", "-v", "-p", &dev], &input)?;
-    // Output for a non-resident assertion: hash, rp id, auth data, signature, then the hmac secret.
-    let last = out.lines().last().ok_or_else(|| "fido2-assert printed nothing".to_string())?;
-    Base64::decode_vec(last)
-        .ok()
-        .and_then(|b| <[u8; 32]>::try_from(b).ok())
-        .ok_or_else(|| "fido2-assert returned no 32-byte hmac-secret (credential made without hmac-secret?)".to_string())
+    parse_assert(&out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b64(b: &[u8]) -> String {
+        Base64::encode_string(b)
+    }
+
+    fn assert_out(lines: &[&str]) -> String {
+        lines.iter().map(|l| format!("{l}\n")).collect()
+    }
+
+    #[test]
+    fn assertion_output_is_parsed_strictly() {
+        let (hash, auth, sig, secret) = (client_data_hash(), b64(&[1; 37]), b64(&[2; 70]), b64(&[7; 32]));
+        let good = [hash.as_str(), RP_ID, &auth, &sig, &secret];
+        assert_eq!(parse_assert(&assert_out(&good)).unwrap(), [7; 32]);
+        // The audit case: one line, the client data hash (32 zero bytes), must not become factor B.
+        assert!(parse_assert(&assert_out(&[&hash])).is_err());
+        assert!(parse_assert("").is_err());
+        // Wrong line count, wrong hash, wrong rp id, missing pieces, wrong secret length, all-zero secret.
+        assert!(parse_assert(&assert_out(&good[..4])).is_err());
+        assert!(parse_assert(&assert_out(&[&good[..], &[secret.as_str()]].concat())).is_err());
+        let zero = b64(&[0; 32]);
+        let wrong_secret = b64(&[7; 31]);
+        let other_hash = b64(&[9; 32]);
+        for bad in [
+            [other_hash.as_str(), RP_ID, &auth, &sig, &secret],
+            [&hash, "example.com", &auth, &sig, &secret],
+            [&hash, RP_ID, "", &sig, &secret],
+            [&hash, RP_ID, &auth, "not base64!", &secret],
+            [&hash, RP_ID, &auth, &sig, &wrong_secret],
+            [&hash, RP_ID, &auth, &sig, &zero],
+        ] {
+            assert!(parse_assert(&assert_out(&bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn credential_output_is_parsed_strictly() {
+        let (hash, auth, id, sig, cert) = (client_data_hash(), b64(&[1; 37]), b64(&[3; 48]), b64(&[2; 70]), b64(&[4; 300]));
+        let good = [hash.as_str(), RP_ID, "packed", &auth, &id, &sig, &cert];
+        assert_eq!(parse_cred(&assert_out(&good)).unwrap(), id);
+        assert_eq!(parse_cred(&assert_out(&good[..6])).unwrap(), id, "no certificate");
+        assert!(parse_cred(&assert_out(&good[..5])).is_err());
+        assert!(parse_cred(&assert_out(&[&hash])).is_err());
+        assert!(parse_cred(&assert_out(&[hash.as_str(), "example.com", "packed", &auth, &id, &sig])).is_err());
+        assert!(parse_cred(&assert_out(&[hash.as_str(), RP_ID, "packed", &auth, "", &sig])).is_err());
+        assert!(parse_cred(&assert_out(&[hash.as_str(), RP_ID, "", &auth, &id, &sig])).is_err());
+    }
 }

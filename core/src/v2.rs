@@ -111,7 +111,8 @@ pub fn stretch_passphrase(passphrase: &str, header: &[u8]) -> Result<[u8; 32], S
 }
 
 /// The pad for the on-chain share at `x`. `secret` is the Argon2id output (passphrase share) or the
-/// 32-byte hardware secret. The label `bk2/<x>` and the whole header are in the HKDF info, so a pad is
+/// 32-byte hardware secret. The label is the share's x, never its position among the masked shares
+/// (they differ as soon as a paper share has a smaller x). The label `bk2/<x>` and the whole header are in the HKDF info, so a pad is
 /// never reused across shares (a passphrase and a hardware secret that happen to be equal) or records
 /// (the hardware secret is the same for every record; the salt in the header is not).
 pub fn pad(secret: &[u8], header: &[u8], x: u8) -> [u8; 32] {
@@ -223,9 +224,7 @@ pub fn unseal(record: &[u8], factors: &[(u8, [u8; 32])]) -> Result<(Vec<u8>, Vec
             .expect("32-byte key")
             .decrypt(Nonce::from_slice(&record[nonce_at..nonce_at + NONCE]), Payload { msg: &record[nonce_at + NONCE..], aad: header });
         if let Ok(plain) = opened {
-            if plain.len() != 33 || ![16, 20, 24, 28, 32].contains(&(plain[0] as usize)) {
-                return Err("malformed plaintext".into());
-            }
+            super::check_plaintext(&plain)?;
             return Ok((plain[1..1 + plain[0] as usize].to_vec(), subset.iter().map(|s| s.0).collect()));
         }
     }
