@@ -9,4 +9,4 @@ rules:
   scope-enum:
     - 2
     - always
-    - [core, recover, vault, publish, spec, vendor, ci, deps]
+    - [core, recover, vault, publish, spec, vendor, ci, commitlint, release, deps]
