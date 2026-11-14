@@ -384,7 +384,16 @@ with `cast code` against a node you trust before relying on it.
 
 ```bash
 cargo test --offline --locked     # unit, format vectors, CLI, and anvil end-to-end tests
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --offline --locked -- -D warnings
+cargo deny check                  # advisories, licences, sources (https://github.com/EmbarkStudios/cargo-deny)
 ```
+
+CI (`.github/workflows/ci.yml`) runs these on Linux and macOS, x86_64 and aarch64, and also checks
+that `vendor/` is exactly what `cargo vendor` produces from `Cargo.lock`. The toolchain is pinned in
+`rust-toolchain.toml`. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org)
+(`type(scope): subject`, scopes in `.commitlintrc.yml`); the PR check enforces it. Pushing a tag
+`vX.Y.Z` runs `release.yml`, which publishes the binaries with checksums and build provenance.
 
 The test profile builds with `opt-level = 3` because the real-parameter vector runs Argon2id at
 1 GiB. The anvil tests in `publish/` skip if `anvil` is not installed; the `vault` test skips if

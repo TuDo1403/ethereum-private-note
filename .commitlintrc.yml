@@ -1,0 +1,9 @@
+# Conventional Commits: `type(scope): subject`, e.g. `fix(vault): name the 1Password account`.
+extends:
+  - "@commitlint/config-conventional"
+rules:
+  # Scope is optional, but when given it must be one of these.
+  scope-enum:
+    - 2
+    - always
+    - [core, recover, vault, publish, spec, vendor, ci, deps]
