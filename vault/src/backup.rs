@@ -300,7 +300,7 @@ pub fn backup(device: Option<String>) -> Result<(), String> {
     let entropy = enter_seed()?;
 
     // Generated, shown once, then proven.
-    let pass = Zeroizing::new(new_passphrase(7));
+    let pass = Zeroizing::new(new_passphrase(12));
     clear();
     step(3, 6, "Passphrase (7 generated words)", true);
     println!("Write it on paper now, in lowercase, one space between words.");
