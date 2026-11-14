@@ -172,9 +172,11 @@ try setups before you go offline. It walks through:
      if one place holds more than n - k shares, so a fire there locks you out. Ok if you can lose any one
      share; strong if you can lose any two or more.
    - **Theft**, what the cheapest combination costs a thief. Weak if one place holds a whole combination
-     of k shares, so one break-in opens the backup. Otherwise ok if some combination needs no YubiKey
-     (a thief then needs papers from different places, or a 1Password account), and strong if every
-     combination needs a YubiKey and its PIN (the key locks after 8 wrong PINs).
+     of k shares, so one break-in opens the backup, or if a whole combination is 1Password shares in one
+     account, so one breach of that account opens it (checked with or without places). Otherwise ok if
+     some combination needs no YubiKey (a thief then needs the passphrase and a paper share, or a
+     1Password account, from different places), and strong if every combination needs a YubiKey and its
+     PIN (the key locks after repeated wrong PINs).
 
    Every warning names the exact combination and suggests a fix: move a share elsewhere, raise k, or add a
    share. The screen lists every combination of k shares that opens the backup. A weak setup is never
@@ -196,7 +198,8 @@ On the **offline** machine, with the YubiKey (or, for several, the YubiKeys) at 
 ```bash
 ./vault backup setup.txt        # the setup made by `vault plan`
 ./vault backup                  # or just ./vault and pick "Make a new backup": choose the setup now
-./vault backup --device PATH    # one YubiKey, when several FIDO2 keys are plugged in (see `fido2-token -L`)
+./vault backup --device PATH    # one YubiKey, when several FIDO2 keys are plugged in (see `fido2-token -L`);
+                                # a setup with more than one YubiKey refuses --device
 ```
 
 Without a file, `vault backup` runs the same setup, places and scoring screens as `vault plan` first, and
@@ -211,15 +214,16 @@ N is depends on the setup:
 1. **Each YubiKey, one at a time.** For each YubiKey share, press Enter to create a new resident credential
    (PIN, then touch), or paste the credential id of one made earlier by `vault`. The id is not secret; it
    goes on the recovery sheet. With several YubiKeys, `vault` says "Plug in only YubiKey B": plug in just
-   that key and press Enter, so that exactly one key is found (with `--device` the setup should have
-   one YubiKey). The keys come before the seed, so a missing key or a wrong PIN fails before you type
-   anything.
+   that key and press Enter, so that exactly one key is found (a setup with more than one YubiKey refuses
+   `--device`). After the credential, its secret is read (PIN and touch). The keys come before the seed,
+   so a missing key or a wrong PIN fails before you type anything.
 
    **Each YubiKey share must be a different physical key.** Otherwise a missed swap, or a pasted id that
    is really on an earlier key, would put two shares on one key, and the self-check would still pass. For
-   every key after the first, and for a pasted id, `vault` asks for the PIN once more (no touch), lists
-   the credentials on the key and refuses a key that holds an earlier share's credential ("this is the
-   same key as YubiKey A"). It also refuses a credential id used twice. This check relies on
+   every key after the first, `vault` asks for the PIN once more (no touch), lists the credentials on the
+   key and refuses a key that holds an earlier share's credential ("this is the same key as YubiKey A")
+   or lacks this share's. (For the first key, reading the secret already fails if a pasted id is not on
+   it.) It also refuses a credential id used twice. This check relies on
    `fido2-token -L -k localhost`, and has not been run against a real YubiKey yet (see
    [Limitations](#limitations)).
 2. **Seed.** Type your 12–24 seed words (hidden), then type them again: both entries must give the same
@@ -228,7 +232,8 @@ N is depends on the setup:
    is stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
 3. **Passphrase** (if the setup has one). Seven words are generated and shown once. Write them down in
    lowercase, one space between words. The screen is cleared and you must type them back.
-4. **Build, check and save.** PIN and touch again for each YubiKey, then Argon2id (1 GiB, takes a while).
+4. **Build, check and save.** The YubiKey secrets were read at step 1; with a passphrase, Argon2id now
+   stretches it (1 GiB, takes a while).
    **Every combination of k shares** is tried against the new record; if any combination fails, nothing
    is saved. Then the two public files, `record.hex` and `recovery-sheet.txt`, are written (and synced to
    disk) **before** any paper share is shown, so a crash later cannot leave you with papers and no
@@ -355,7 +360,8 @@ the arrow keys and Enter. Paste the record
 hex, or give the path to `record.hex` (a `recovery-sheet.txt` beside it supplies the share names, each
 YubiKey credential id and each 1Password item; sheets made by earlier versions of `vault` still work).
 Say which factors you have; the YubiKeys are asked first so a missing key or wrong PIN fails before you
-type anything, one at a time ("plug in only YubiKey B") when you hold several. A share kept in 1Password
+type anything, one at a time ("plug in only YubiKey B") when you hold several; if a key cannot be read
+(another key still plugged in, a wrong PIN), you are asked to plug it in again. A share kept in 1Password
 is offered from 1Password (Touch ID); if that read fails, you are asked to type the paper instead. Paper
 shares are entered word by word, the passphrase hidden. Three attempts. Verify only also lists any share
 you held that was not needed, since any k shares open the record: test such a share in another run. This
@@ -498,9 +504,10 @@ with `cast code` against a node you trust before relying on it.
   test run on a testnet before mainnet. Legacy (non-EIP-1559) chains are unsupported.
 - **The different-key check has not been run against a real YubiKey yet.** `vault backup` refuses a second
   YubiKey share that is the same physical key as an earlier one by listing the credentials on the key
-  (`fido2-token -L -k localhost`); the tests only use fake keys. Until it has been tried on real hardware,
-  confirm yourself that each YubiKey share is on its own key, for example by listing each key's credentials
-  with its PIN and checking that each credential id on the recovery sheet appears on exactly one key.
+  (`fido2-token -L -k localhost <device>`), which needs a YubiKey with FIDO2 credential management; the
+  tests only use fake keys. Until it has been tried on real hardware, confirm yourself that each YubiKey
+  share is on its own key: list each key's credentials with its PIN (the command under
+  [Restoring](#restoring)) and check that each credential id on the recovery sheet appears on exactly one key.
 - The scores from `vault plan` only judge the places you type. They warn and never block.
 - `recover` does not wipe secrets from memory after use (`vault` does).
 
