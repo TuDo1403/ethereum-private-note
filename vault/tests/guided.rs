@@ -387,3 +387,119 @@ fn backup_with_1password_then_verify_only_restore() {
     );
     std::fs::remove_dir_all(&work).unwrap();
 }
+
+// vectors.json entry 1: 3 of 5 = passphrase, YubiKey, YubiKey, paper, paper. The tests below hold shares
+// 2, 3 and 4 (or 2, 4 and 5), so no Argon2 runs.
+const V1_RECORD: &str = "020000040001a0a1a2a3a4a5a6a7a8a9aaabacadaeaf03050102020303375e1076118f6220d163af412c125935ed642cb3db64a25ff41681b626ad677f9a9e62092c14ecc6ec307a2ed3576671fdeb150a5ef9885730a6b68b18294ac4e6b6e116875adbc39b8fa68c5677086dc3fdb2f87188f8203083667d1b89400ca5acb3bac1c8cfd6dde4ebf20f04edfdadee4ec815d33e80eba11490ddde601c68f983a0fd2b15d61f884fb4046a0556b5f9b4c8e3926a9667c57850e8";
+const V1_MNEMONIC: &str = "arctic live gadget display excess mandate sniff autumn people disorder affair hole retreat fancy close tip deer village tuition orbit cannon owner maid spare";
+const V1_WORDS4: &str = "flight clock injury host plastic slide across memory patrol raven endless custom leisure caught start crater zero muffin inquiry canal donkey version decide kitchen";
+const V1_WORDS5: &str = "juice clerk lab quit pool room lizard moment library ramp faculty wagon keen crucial feature custom tent normal erupt throw drip tissue reunion grunt";
+
+/// A fake `fido2-assert` that answers with entry 1's share-2 secret for credential `Zm9v` and its share-3
+/// secret for `YmFy` (32 bytes 0x52.. and 0x53.., base64), echoing the hash and rp id as libfido2 does.
+const V1_ASSERT: &str = r#"read h; read rp; read id; read salt
+case "$id" in
+  Zm9v) s=UlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHE= ;;
+  YmFy) s=U1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXI= ;;
+  *) exit 1 ;;
+esac
+printf '%s\n' "$h" "$rp" AQID AQID "$s""#;
+
+/// Runs `script` against entry 1's record, with `sheet` as the recovery-sheet.txt beside record.hex.
+fn restore_v1(name: &str, sheet: &str, script: &str) {
+    let fido2_token = "echo '/dev/fake: vendor=0x1050, product=0x0407 (Yubico YubiKey)'";
+    let tools = [("fido2-assert", V1_ASSERT), ("fido2-token", fido2_token)];
+    let fp = epn_core::seed_fingerprint(&epn_core::bip39::words_to_entropy(V1_MNEMONIC).unwrap());
+    let script = format!(
+        r#"
+foreach {{file var}} {{record.hex RECORD recovery-sheet.txt SHEET}} {{
+    set f [open "$env(WORK)/$file" w]; puts -nonewline $f $env($var); close $f
+}}
+{script}"#
+    );
+    let env = [
+        ("RECORD", V1_RECORD),
+        ("SHEET", sheet),
+        ("FP", fp.as_str()),
+        ("WORDS4", V1_WORDS4),
+        ("WORDS5", V1_WORDS5),
+    ];
+    if let Some((work, _)) = run_script(name, &script, &tools, &env) {
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+}
+
+/// Verify-only restore start: the mode menu, then the record path.
+const V1_START: &str = r#"
+expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
+pick "What should this run do?" 0
+expect "record.hex: "; send "$env(WORK)/record.hex\r"
+"#;
+
+const V1_END: &str = r#"
+expect -re {Seed fingerprint: ([0-9a-f]{8})} {
+    if {$expect_out(1,string) ne $env(FP)} { fail "fingerprint $expect_out(1,string) is not $env(FP)" }
+}
+expect eof
+"#;
+
+/// Two YubiKeys named on a new-format sheet (the lines `sheet::render` writes): the restore takes each
+/// credential from its `share N:` line, asks for no credential id, and has the keys plugged in one at a time.
+#[test]
+fn restore_two_keys_from_new_sheet() {
+    let sheet = format!(
+        "Recovery sheet.\n\nrecord:           0x{V1_RECORD}\n\n\
+         share 1:  passphrase   \"passphrase\"\n\
+         share 2:  yubikey      \"YubiKey A\"  credential Zm9v   (rpId localhost)\n\
+         share 3:  yubikey      \"YubiKey B\"  credential YmFy   (rpId localhost)\n\
+         share 4:  paper        \"paper A\"\n\
+         share 5:  paper        \"paper B\"\n"
+    );
+    let script = format!(
+        r#"
+spawn $env(VAULT) restore
+{V1_START}
+answer "share 1: passphrase" n
+answer "share 2: YubiKey A (YubiKey and its PIN)" y
+answer "share 3: YubiKey B (YubiKey and its PIN)" y
+answer "share 4: paper A (paper share (24 words))" y
+answer "share 5: paper B" n
+foreach {{x label}} {{2 A 3 B}} {{
+    expect {{
+        -ex "Credential id of the YubiKey" {{ fail "asked for a credential the sheet has" }}
+        -ex "Plug in only the YubiKey that is share $x (\"YubiKey $label\"), then press Enter." {{ send "\r" }}
+    }}
+    expect "Enter the PIN"
+}}
+type_words $env(WORDS4)
+{V1_END}"#
+    );
+    restore_v1("new-sheet", &sheet, &script);
+}
+
+/// Every backup made before setups were flexible must still restore: its sheet has one `credential:` line.
+#[test]
+fn restore_from_old_sheet_finds_credential() {
+    let sheet = format!(
+        "record:           0x{V1_RECORD}\n\
+         credential:       Zm9v   (YubiKey, share 2, rpId localhost)\n"
+    );
+    let script = format!(
+        r#"
+spawn $env(VAULT) restore --device /dev/fake
+{V1_START}
+answer "share 1: passphrase" n
+answer "share 2: YubiKey and its PIN" y
+answer "share 3: YubiKey and its PIN" n
+answer "share 4: paper share (24 words)" y
+answer "share 5: paper share (24 words)" y
+expect {{
+    -ex "Credential id of the YubiKey" {{ fail "asked for a credential the sheet has" }}
+    -ex "Enter the PIN"
+}}
+type_words $env(WORDS4)
+type_words $env(WORDS5)
+{V1_END}"#
+    );
+    restore_v1("old-sheet", &sheet, &script);
+}

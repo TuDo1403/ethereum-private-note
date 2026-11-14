@@ -3,47 +3,29 @@
 
 use crate::onepassword;
 use crate::prompt::*;
+use crate::sheet::{self, Locator, SheetShare};
 use epn_core::bip39::words_to_entropy;
 use epn_core::record::{Header, Kind, parse_record, restore};
 use epn_core::{fido, seed_fingerprint, unhex};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-/// What a recovery-sheet.txt beside record.hex tells the restore: the YubiKey credential id and the
-/// 1Password references of shares kept there, so the user does not have to find them.
-#[derive(Default)]
-struct SheetHints {
-    cred: Option<String>,
-    op_refs: Vec<onepassword::SheetRef>,
-}
-
-/// The record, from a pasted hex string or a record.hex file (with the hints of the sheet beside it).
-fn read_record() -> Result<(Vec<u8>, Header, SheetHints), String> {
+/// The record, from a pasted hex string or a record.hex file (with the shares named by the
+/// recovery-sheet.txt beside it, so the user does not have to find their credential ids and references).
+fn read_record() -> Result<(Vec<u8>, Header, Vec<SheetShare>), String> {
     for _ in 0..TRIES {
         let input = ask("Paste the record (0x...) or the path to record.hex: ")?;
         let path = std::path::Path::new(&input);
-        let (text, hints) = if path.is_file() {
+        let (text, shares) = if path.is_file() {
             let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
             let sheet = std::fs::read_to_string(path.with_file_name("recovery-sheet.txt"))
                 .unwrap_or_default();
-            let cred = sheet.lines().find_map(|l| {
-                l.strip_prefix("credential:")?
-                    .split_whitespace()
-                    .next()
-                    .map(str::to_string)
-            });
-            (
-                text,
-                SheetHints {
-                    cred,
-                    op_refs: onepassword::sheet_references(&sheet),
-                },
-            )
+            (text, sheet::parse(&sheet))
         } else {
-            (input.clone(), SheetHints::default())
+            (input.clone(), Vec::new())
         };
         match unhex(&text).and_then(|r| parse_record(&r).map(|h| (r, h))) {
-            Ok((r, h)) => return Ok((r, h, hints)),
+            Ok((r, h)) => return Ok((r, h, shares)),
             Err(e) => println!("That is not a record: {e}"),
         }
     }
@@ -59,27 +41,41 @@ fn label(kind: Kind, in_1password: bool) -> &'static str {
     }
 }
 
+/// What a share is called in a prompt: its sheet label (when it has one) before what it is.
+fn describe(kind: Kind, s: Option<&SheetShare>) -> String {
+    let what = label(
+        kind,
+        matches!(s, Some(s) if matches!(s.locator, Locator::OnePassword { .. })),
+    );
+    match s {
+        Some(s) if !s.label.is_empty() => format!("{} ({what})", s.label),
+        _ => what.to_string(),
+    }
+}
+
 /// Offer to read share `x` from 1Password. `op` needs the network, so an offline restore declines and
 /// types the words instead.
-fn read_from_1password(x: u8, r: &onepassword::SheetRef) -> Result<bool, String> {
+fn read_from_1password(x: u8, reference: &str, account: &str) -> Result<bool, String> {
     println!(
         "Share {x} is in 1Password. Reading it needs the network; offline, answer no and type the 24 words"
     );
     println!("the 1Password app shows on another device.");
     yes(&format!(
-        "Read share {x} from 1Password ({}, account {}); it asks for Touch ID?",
-        r.reference, r.account
+        "Read share {x} from 1Password ({reference}, account {account}); it asks for Touch ID?"
     ))
 }
 
 /// Share `x` from 1Password when the sheet names it and the person agrees, else typed from paper. A failed
 /// read (locked, Touch ID cancelled, offline) falls back to typing: a restore is done under stress and must
 /// not end here after the YubiKey PIN and touch.
-fn paper_share(x: u8, r: Option<&onepassword::SheetRef>) -> Result<Zeroizing<String>, String> {
-    if let Some(r) = r
-        && read_from_1password(x, r)?
+fn paper_share(x: u8, s: Option<&SheetShare>) -> Result<Zeroizing<String>, String> {
+    if let Some(SheetShare {
+        locator: Locator::OnePassword { reference, account },
+        ..
+    }) = s
+        && read_from_1password(x, reference, account)?
     {
-        match onepassword::read(&r.account, &r.reference) {
+        match onepassword::read(account, reference) {
             Ok(words) => return Ok(words),
             Err(e) => println!("{e}\nType the 24 words from the paper instead."),
         }
@@ -98,9 +94,20 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
     ];
     // Verify only comes first: it is the safe default for the test restores a backup asks for.
     let verify_only = choose("What should this run do?", &modes)? == 0;
-    let (record, h, hints) = read_record()?;
-    let mut sheet_cred = hints.cred;
-    let op_ref = |x: u8| hints.op_refs.iter().find(|r| r.x == x);
+    let (record, h, sheet) = read_record()?;
+    let kind = |x: u8| h.kinds[x as usize - 1];
+    // The sheet is a plain file that gets copied around, so the record header decides: the first line for
+    // share x is used only when x is one of the record's shares and its locator fits that share's kind.
+    let on_sheet = |x: u8| {
+        sheet.iter().find(|s| s.x == x).filter(|s| {
+            matches!(
+                (kind(x), &s.locator),
+                (_, Locator::None)
+                    | (Kind::Hardware, Locator::Credential(_))
+                    | (Kind::Paper, Locator::OnePassword { .. })
+            )
+        })
+    };
 
     let held: Vec<u8> = loop {
         println!(
@@ -111,10 +118,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
         let mut held = Vec::new();
         for (i, &kind) in h.kinds.iter().enumerate() {
             let x = i as u8 + 1;
-            if yes(&format!(
-                "  share {x}: {}",
-                label(kind, op_ref(x).is_some())
-            ))? {
+            if yes(&format!("  share {x}: {}", describe(kind, on_sheet(x))))? {
                 held.push(x);
             }
         }
@@ -126,7 +130,6 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
             h.k
         );
     };
-    let kind = |x: u8| h.kinds[x as usize - 1];
 
     // The keys first: a missing key or a wrong PIN should fail before any typing.
     let mut hardware = Zeroizing::new(Vec::with_capacity(5)); // never reallocates: a move would leave an unwiped copy
@@ -135,15 +138,25 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
         .copied()
         .filter(|&x| kind(x) == Kind::Hardware)
         .collect();
-    // The sheet names the credential of the one YubiKey `vault` enrolls; with several keys it cannot say
-    // which share it belongs to, so each is asked for.
-    if keys.len() != 1 {
-        sheet_cred = None;
-    }
+    // Without --device the key is found by listing, which fails with two plugged in: one at a time.
+    let one_at_a_time = keys.len() > 1 && device.is_none();
     for &x in &keys {
-        let cred = match sheet_cred.take() {
-            Some(c) => c,
-            None => ask(&format!(
+        let s = on_sheet(x);
+        if one_at_a_time {
+            let name = match s {
+                Some(s) if !s.label.is_empty() => format!(" (\"{}\")", s.label),
+                _ => String::new(),
+            };
+            pause(&format!(
+                "Plug in only the YubiKey that is share {x}{name}, then press Enter."
+            ))?;
+        }
+        let cred = match s {
+            Some(SheetShare {
+                locator: Locator::Credential(c),
+                ..
+            }) => c.clone(),
+            _ => ask(&format!(
                 "Credential id of the YubiKey that is share {x} (from your recovery sheet): "
             ))?,
         };
@@ -163,7 +176,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
             println!();
             let secret = match kind(x) {
                 Kind::Passphrase => ask_hidden("passphrase, exactly as written (hidden): ")?,
-                _ => paper_share(x, op_ref(x))?,
+                _ => paper_share(x, on_sheet(x))?,
             };
             typed.insert(x, secret);
         }
@@ -222,7 +235,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
                 for &x in typed.keys() {
                     if yes(&format!(
                         "Enter share {x} ({}) again?",
-                        label(kind(x), op_ref(x).is_some())
+                        describe(kind(x), on_sheet(x))
                     ))? {
                         redo.push(x);
                     }
