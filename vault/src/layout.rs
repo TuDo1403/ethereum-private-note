@@ -195,7 +195,8 @@ impl Layout {
     }
 }
 
-/// `share <x> <kind> "<label>"`, plus ` account <account> vault "<vault>"` for 1Password.
+/// `share <x> <kind> "<label>"`, plus ` account <account> vault "<vault>"` for 1Password. Errors never
+/// echo the file's text: it is untrusted and could carry escape sequences to the terminal.
 fn parse_share(line: &str) -> Result<(usize, ShareSpec), String> {
     let bad = || "expected: share <number> <kind> \"<label>\"".to_string();
     let (x, rest) = line
@@ -208,7 +209,7 @@ fn parse_share(line: &str) -> Result<(usize, ShareSpec), String> {
     let kind = match kind {
         "passphrase" | "yubikey" | "paper" => {
             if !rest.is_empty() {
-                return Err(format!("unexpected text after the label: {rest}"));
+                return Err("unexpected text after the label".into());
             }
             match kind {
                 "passphrase" => ShareKind::Passphrase,
@@ -225,14 +226,18 @@ fn parse_share(line: &str) -> Result<(usize, ShareSpec), String> {
                 .ok_or_else(needs)?;
             let (vault, rest) = quoted(rest.strip_prefix("vault ").ok_or_else(needs)?)?;
             if !rest.is_empty() {
-                return Err(format!("unexpected text after the vault: {rest}"));
+                return Err("unexpected text after the vault".into());
             }
             ShareKind::OnePassword {
                 account: account.into(),
                 vault: vault.into(),
             }
         }
-        other => return Err(format!("unknown share kind \"{other}\"")),
+        _ => {
+            return Err(
+                "unknown share kind (passphrase, yubikey, paper or 1password expected)".into(),
+            );
+        }
     };
     Ok((
         x,
@@ -404,10 +409,19 @@ mod tests {
             "epn setup v1\nk 2\nshare 1 paper \"a\"\nshare 2 yubikey \"b\"\n",
             // trailing junk after a quoted label
             "epn setup v1\nk 2\nshare 1 paper \"a\" x\nshare 2 paper \"b\"\n",
+            // escape sequences in a kind, after a label, after a vault, in a label
+            "epn setup v1\nk 2\nshare 1 \x1b[2J \"a\"\nshare 2 paper \"b\"\n",
+            "epn setup v1\nk 2\nshare 1 paper \"a\" \x1b[2J\nshare 2 paper \"b\"\n",
+            "epn setup v1\nk 2\nshare 1 paper \"a\"\nshare 2 1password \"b\" account a.b vault \"v\" \x1b]0;x\x07\n",
+            "epn setup v1\nk 2\nshare 1 paper \"a\x1b[2J\"\nshare 2 paper \"b\"\n",
         ] {
             let e = Layout::parse_plan(bad).unwrap_err();
             assert!(!e.is_empty(), "{bad:?}");
+            // the file's text is never echoed: nothing in an error can rewrite the screen
+            assert!(!e.chars().any(hides_text), "{bad:?} gave {e:?}");
         }
+        let e = Layout::parse_plan("epn setup v1\nk 2\nshare 1 \x1b[2J \"a\"\n").unwrap_err();
+        assert!(e.starts_with("setup.txt line 3: unknown share kind"), "{e}");
         assert!(
             check_label("a\"b").is_err()
                 && check_label("a\nb").is_err()
