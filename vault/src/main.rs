@@ -14,6 +14,8 @@ mod layout;
 mod onepassword;
 mod prompt;
 mod restore;
+#[allow(dead_code)] // used from Task 6
+mod score;
 
 use clap::{Parser, Subcommand};
 use prompt::{choose, clear};
