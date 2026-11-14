@@ -11,7 +11,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use unicode_normalization::UnicodeNormalization;
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 1;
 const MAX_N: usize = 5;
 /// 1 GiB, 3 passes. A restore needs this much free memory, so do not pick a number your recovery
 /// machine cannot allocate.
@@ -188,7 +188,7 @@ pub fn stretch_passphrase(passphrase: &str, header: &[u8]) -> Result<[u8; 32], S
 
 /// The pad for the on-chain share at `x`. `secret` is the Argon2id output (passphrase share) or the
 /// 32-byte hardware secret. The label is the share's x, never its position among the masked shares
-/// (they differ as soon as a paper share has a smaller x). The label `bk2/<x>` and the whole header are
+/// (they differ as soon as a paper share has a smaller x). The label `bk1/<x>` and the whole header are
 /// in the HKDF info, so a pad is never reused across shares (a passphrase and a hardware secret that
 /// happen to be equal) or records (the hardware secret is the same for every record; the salt in the
 /// header is not).
@@ -196,7 +196,7 @@ pub fn pad(secret: &[u8], header: &[u8], x: u8) -> [u8; 32] {
     let mut out = [0u8; 32];
     Hkdf::<Sha256>::new(Some(&[0u8; 32]), secret)
         .expand(
-            &[b"bk2/".as_slice(), &[b'0' + x], header].concat(),
+            &[b"bk1/".as_slice(), &[b'0' + x], header].concat(),
             &mut out,
         )
         .expect("32 bytes is a valid length");

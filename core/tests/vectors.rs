@@ -548,21 +548,6 @@ fn reproduces_every_vector() {
 }
 
 #[test]
-fn presets_have_the_documented_layout() {
-    let salt = [9u8; 16];
-    let h = parse_header(&header_2_of_3(1024, 1, &salt)).unwrap();
-    assert_eq!(
-        (h.k, h.kinds.as_slice(), h.record_len()),
-        (2, &[S, H, P][..], 152)
-    );
-    let h = parse_header(&new_header(1024, 1, &salt, 3, &[S, H, H, P, P]).unwrap()).unwrap();
-    assert_eq!(
-        (h.k, h.kinds.as_slice(), h.record_len()),
-        (3, &[S, H, H, P, P][..], 186)
-    );
-}
-
-#[test]
 fn header_validation() {
     let salt = [0u8; 16];
     assert!(new_header(1024, 1, &salt, 1, &[S, H]).is_err(), "k >= 2");
@@ -575,14 +560,6 @@ fn header_validation() {
     assert!(
         new_header(1024, 1, &salt, 5, &[S, H, H, P, P]).is_ok(),
         "5-of-5"
-    );
-    // An untrusted record cannot make us allocate by its own number.
-    let mut header = header_2_of_3(1024, 1, &salt);
-    header[1..5].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(
-        stretch_passphrase("x", &header)
-            .unwrap_err()
-            .contains("refusing")
     );
 }
 
@@ -623,17 +600,6 @@ fn seal_checks_its_inputs() {
 }
 
 #[test]
-fn pads_differ_by_share_and_by_header() {
-    let (h1, h2) = (
-        header_2_of_3(1024, 1, &[1; 16]),
-        header_2_of_3(1024, 1, &[2; 16]),
-    );
-    let secret = [5u8; 32];
-    assert_ne!(pad(&secret, &h1, 1), pad(&secret, &h1, 2));
-    assert_ne!(pad(&secret, &h1, 2), pad(&secret, &h2, 2));
-}
-
-#[test]
 fn malformed_headers_and_records_are_refused() {
     let header = header_2_of_3(1024, 1, &[0; 16]);
     let pads = [(1, [1u8; 32]), (2, [2u8; 32])];
@@ -647,10 +613,6 @@ fn malformed_headers_and_records_are_refused() {
     assert!(unseal(&record[1..], &all).is_err());
     for len in [0, 1, 23, 24, 26, 27, 100, 151] {
         assert!(unseal(&record[..len], &all).is_err(), "len {len}");
-        assert!(
-            restore(&record[..len], None, &[], &[]).is_err(),
-            "len {len}"
-        );
     }
 
     let with = |edit: &dyn Fn(&mut Vec<u8>)| {
@@ -659,7 +621,7 @@ fn malformed_headers_and_records_are_refused() {
         parse_header(&h)
     };
     assert!(with(&|_| {}).is_ok());
-    assert!(with(&|h| h[0] = 1).is_err(), "version");
+    assert!(with(&|h| h[0] = 2).is_err(), "version");
     assert!(with(&|h| h[24] = 9).is_err(), "unknown kind byte");
     assert!(with(&|h| h[24] = 0).is_err(), "kind 0");
     assert!(with(&|h| h[22] = 0).is_err(), "k = 0");

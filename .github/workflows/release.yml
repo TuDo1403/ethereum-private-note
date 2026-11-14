@@ -2,10 +2,13 @@ name: Release
 
 # Push a tag like v1.2.3 to build the binaries on every supported architecture and publish them,
 # with checksums and build provenance, as a GitHub release. "Run workflow" does the same builds
-# without publishing, as a dry run.
+# without publishing, as a dry run. Only plain vX.Y.Z tags run: a pre-release tag such as v1.2.3-rc1
+# would be published as a normal release, so it is not matched.
+#
+# Tag only a commit whose `ci` check is green: nothing here checks that.
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
 
 permissions:
@@ -31,6 +34,8 @@ jobs:
           - { name: macos-aarch64, os: macos-latest }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # `vault --version` reports the workspace version, so a tag that disagrees would ship binaries
       # that name the wrong release.
       - name: Tag matches the workspace version
@@ -41,9 +46,16 @@ jobs:
           version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           test "$TAG" = "v$version" || { echo "tag $TAG != Cargo.toml version $version" >&2; exit 1; }
       - run: cargo build --release --locked --bins
+      # The binaries must start on this platform (a missing library fails here, not on a user's machine).
+      # `recover` has no --version.
+      - name: Smoke test
+        run: |
+          target/release/vault --version
+          target/release/publish --version
+      # Branch names may contain '/', which a tarball name cannot: only a tag names the package.
       - name: Package
         env:
-          NAME: epn-${{ github.ref_name }}-${{ matrix.name }}
+          NAME: epn-${{ github.ref_type == 'tag' && github.ref_name || 'dryrun' }}-${{ matrix.name }}
         run: |
           mkdir "$NAME"
           cp target/release/{recover,vault,publish} README.md SPEC.md "$NAME"/
@@ -65,6 +77,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist

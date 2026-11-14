@@ -19,10 +19,7 @@ DEST="${EPN_INSTALL_DIR:-$HOME/.local/bin}"
 die() { echo "install.sh: $*" >&2; exit 1; }
 
 # We cd into a temp dir below, so a relative destination would resolve there and be deleted.
-case "$DEST" in
-  /*) ;;
-  *) DEST="$PWD/$DEST" ;;
-esac
+case "$DEST" in /*) ;; *) DEST="$PWD/$DEST" ;; esac
 
 case "$VERSION" in
   @*) die "no version stamped: use the install.sh from a release page, or set EPN_VERSION=vX.Y.Z" ;;
@@ -49,13 +46,19 @@ cd "$tmp"
 pkg="epn-$VERSION-$name"
 base="https://github.com/$REPO/releases/download/$VERSION"
 echo "Downloading $pkg.tar.gz"
-curl -fsSL -O "$base/$pkg.tar.gz" -O "$base/SHA256SUMS"
+# --fail-early: curl reports only the last transfer's status otherwise, so a missing tarball would
+# surface as a checksum mismatch.
+curl --fail-early --proto '=https' -fsSL -O "$base/$pkg.tar.gz" -O "$base/SHA256SUMS"
 
 # Check only this tarball's line: SHA256SUMS lists every platform and we fetch one.
 grep " $pkg.tar.gz\$" SHA256SUMS > expected || die "$pkg.tar.gz is not listed in SHA256SUMS"
 sha256 -c expected >/dev/null || die "checksum mismatch for $pkg.tar.gz; not installing"
 
 tar -xzf "$pkg.tar.gz"
+# Check everything is there before replacing anything: a half-installed set would mix two releases.
+for bin in vault recover publish; do
+  [ -f "$pkg/$bin" ] || die "$pkg.tar.gz has no $bin; not installing"
+done
 mkdir -p "$DEST"
 for bin in vault recover publish; do
   install -m 755 "$pkg/$bin" "$DEST/$bin"

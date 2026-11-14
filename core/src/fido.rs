@@ -136,9 +136,10 @@ fn parse_assert(out: &str) -> Result<[u8; 32], String> {
 /// The id is pasted into the tool's line-based input, so it must be plain base64 (no newline smuggling).
 /// Callers check it early: before a PIN is asked for, and at the start of a backup.
 pub fn check_cred_id(cred_id: &str) -> Result<(), String> {
-    Base64::decode_vec(cred_id)
-        .map(drop)
-        .map_err(|_| "credential id is not valid base64".to_string())
+    match Base64::decode_vec(cred_id) {
+        Ok(id) if !id.is_empty() => Ok(()),
+        _ => Err("credential id is not valid base64".into()),
+    }
 }
 
 /// `fido2-token -L -k` output: one `<index>: <credential id> <display name> <user id> <type> <protection>`
@@ -203,7 +204,7 @@ mod tests {
         );
         let good = [hash.as_str(), RP_ID, &auth, &sig, &secret];
         assert_eq!(parse_assert(&assert_out(&good)).unwrap(), [7; 32]);
-        // The audit case: one line, the client data hash (32 zero bytes), must not become the hardware secret.
+        // One line, the client data hash (32 zero bytes), must not become the hardware secret.
         assert!(parse_assert(&assert_out(&[&hash])).is_err());
         assert!(parse_assert("").is_err());
         // Wrong line count, wrong hash, wrong rp id, missing pieces, wrong secret length, all-zero secret.

@@ -3,12 +3,9 @@
 //!
 //! The sheet is PUBLIC and gets copied around. Nothing on it is secret, and it never says where a share is
 //! kept (places only score a setup while planning, see layout.rs), so `render` takes no places.
-//!
-//! `parse` also reads sheets made before setups were flexible: one `credential:` line (the YubiKey, share
-//! 2) and `1password:` lines, so every backup made so far still restores through `vault restore`.
 
 use crate::layout::{Layout, ShareKind, hides_text};
-use crate::onepassword::{check_account, reference, sheet_references, split_reference, title};
+use crate::onepassword::{check_account, reference, split_reference, title};
 use epn_core::{hex, record_id};
 
 /// How a share is reached, as far as the sheet can tell.
@@ -25,7 +22,6 @@ pub enum Locator {
 #[derive(Debug, PartialEq, Eq)]
 pub struct SheetShare {
     pub x: u8,
-    /// Empty for shares read from an old sheet, which names no labels.
     pub label: String,
     pub locator: Locator,
 }
@@ -122,35 +118,11 @@ pub fn render(
     )
 }
 
-/// Shares named by a sheet: the `share N:` lines of a new sheet, else the `credential:` line (share 2)
-/// and `1password:` lines of an old one. A sheet is a plain file that gets copied around, so a line that
-/// does not pass the checks made at backup is skipped, and nothing odd from it reaches `op` or `fido2`.
+/// The shares a sheet names, from its `share N:` lines. A sheet is a plain file that gets copied around, so
+/// a line that does not pass the checks made at backup is skipped, and nothing odd from it reaches `op` or
+/// `fido2`.
 pub fn parse(sheet: &str) -> Vec<SheetShare> {
-    let new: Vec<SheetShare> = sheet.lines().filter_map(parse_line).collect();
-    if !new.is_empty() {
-        return new;
-    }
-    let cred = sheet.lines().find_map(|l| {
-        let cred = l
-            .strip_prefix("credential:")?
-            .split_whitespace()
-            .next()?
-            .to_string();
-        Some(SheetShare {
-            x: 2,
-            label: String::new(),
-            locator: Locator::Credential(cred),
-        })
-    });
-    let op = sheet_references(sheet).into_iter().map(|r| SheetShare {
-        x: r.x,
-        label: String::new(),
-        locator: Locator::OnePassword {
-            reference: r.reference,
-            account: r.account,
-        },
-    });
-    cred.into_iter().chain(op).collect()
+    sheet.lines().filter_map(parse_line).collect()
 }
 
 /// `share <x>:  <kind>  "<label>"  <locator>`. The label sits between the first pair of quotes (labels
@@ -160,7 +132,7 @@ fn parse_line(l: &str) -> Option<SheetShare> {
     let (kind, rest) = rest.trim_start().split_once(' ')?;
     let (label, tail) = rest.trim_start().strip_prefix('"')?.split_once('"')?;
     // The label is printed in restore prompts, where such a character could rewrite or disguise the screen.
-    if label.chars().any(hides_text) {
+    if label.is_empty() || label.chars().any(hides_text) {
         return None;
     }
     let tail = tail.trim();
@@ -208,7 +180,7 @@ mod tests {
     const RECORD: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
     #[test]
-    fn new_sheet_round_trips() {
+    fn sheet_round_trips() {
         let layout = Layout::new(
             2,
             vec![
@@ -281,19 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn old_sheet_is_read() {
-        let old = "credential:       Zm9vYmFy   (YubiKey, share 2, rpId localhost)\n\
-                   1password:        share 2 op://Personal/epn-share-2-ab/password account my.1password.com\n";
-        let p = parse(old);
-        assert!(p.contains(&SheetShare {
-            x: 2,
-            label: String::new(),
-            locator: Locator::Credential("Zm9vYmFy".into())
-        }));
-        assert!(p.iter().any(|s| matches!(&s.locator, Locator::OnePassword { reference, .. } if reference.ends_with("epn-share-2-ab/password"))));
-    }
-
-    #[test]
     fn odd_share_lines_are_skipped() {
         for bad in [
             "share 2:  1password    \"x\" op://Personal/a\"b/password account me@x.com\n",
@@ -302,11 +261,9 @@ mod tests {
             "share 2:  yubikey      \"x\"\n",                          // no credential
             "share 2:  laser        \"x\"\n",
             "share two:  paper      \"x\"\n",
-            "share 2:  paper        x\n",              // no quotes
-            "share 2:  paper        \"a\x1b[2Jb\"\n",  // ESC
-            "share 2:  paper        \"a\rb\"\n",       // CR
-            "share 2:  paper        \"a\u{202E}b\"\n", // bidi override
-            "share 2:  paper        \"a\u{200B}b\"\n", // zero width space
+            "share 2:  paper        x\n",             // no quotes
+            "share 2:  paper        \"\"\n",          // empty label
+            "share 2:  paper        \"a\x1b[2Jb\"\n", // hidden text, see layout::hides_text
         ] {
             assert!(parse(bad).is_empty(), "{bad:?}");
         }

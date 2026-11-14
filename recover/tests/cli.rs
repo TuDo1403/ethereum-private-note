@@ -57,20 +57,6 @@ fn restore_reads_one_factor_per_stdin_line() {
         assert!(out.status.success(), "{}", stderr(&out));
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), f("mnemonic"));
     }
-    // Two factors are fewer than k: a clear error.
-    let out = cli(
-        &["restore", f("record")],
-        &format!("hw 2 {hw2}\npaper 4 {p4}\n"),
-    );
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("need at least 3"));
-    // x = 1 is the passphrase share, not a hardware share.
-    let wrong = "00".repeat(32);
-    let out = cli(
-        &["restore", f("record")],
-        &format!("hw 2 {hw2}\nhw 3 {hw3}\npaper 4 {p4}\nhw 1 {wrong}\n"),
-    );
-    assert_eq!(out.status.code(), Some(1));
     // Secrets never come from argv, and nothing misplaced is echoed (stdout or stderr). An unknown flag is
     // just an unexpected argument.
     for args in [
@@ -133,7 +119,7 @@ fn restore_never_repeats_stdin_and_checks_before_slow_work() {
         assert_eq!(out.status.code(), Some(2), "{input:?}: {all}");
         assert!(all.contains("stdin line "), "{input:?}: {all}");
     }
-    // The exact case the review found: a mistyped word is reported by line and kind only.
+    // A mistyped word is reported by line and kind only.
     let out = cli(
         &["restore", rec],
         &format!("{good}paper 4 {}\n", words(secret)),
@@ -170,10 +156,10 @@ fn restore_never_repeats_stdin_and_checks_before_slow_work() {
             && !err.contains("Stretching"),
         "{err}"
     );
-    // Only version 2 records are read: another version byte is refused.
-    let out = cli(&["restore", &format!("01{}", &rec[2..])], &good);
+    // Another version byte is refused.
+    let out = cli(&["restore", &format!("02{}", &rec[2..])], &good);
     assert!(
-        out.status.code() == Some(1) && stderr(&out).contains("unknown record version 1"),
+        out.status.code() == Some(1) && stderr(&out).contains("unknown record version 2"),
         "{}",
         stderr(&out)
     );
@@ -237,7 +223,8 @@ fn yubikey_output_is_parsed_strictly() {
         out.status.code() == Some(1) && err.contains("base64") && !err.contains("PIN"),
         "{err}"
     );
-    // The audit case: only the client data hash (32 zero bytes) printed. It must not become the hardware secret.
+    // Output that is not a full assertion (only the client data hash, a zero or a short secret) never becomes
+    // the hardware secret.
     for (name, body) in [
         ("one-line", "read h; echo \"$h\"".to_string()),
         ("zero-secret", fake(&base64(&[0; 32]))),

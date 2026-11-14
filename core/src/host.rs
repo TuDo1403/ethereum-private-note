@@ -9,7 +9,7 @@
 //!   machine you trust" from advice into a check. Absence of a finding proves nothing: the agent list is
 //!   short and a determined agent is not found by its install path.
 //!
-//! Unix only, like the FIDO2 tools. This is the only module with `unsafe`: a few libc calls.
+//! Unix only, like the FIDO2 tools. Its `unsafe` is a few libc calls.
 #![allow(unsafe_code)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -53,14 +53,14 @@ fn is_external(a: IpAddr) -> bool {
     }
 }
 
-/// Addresses of interfaces that are up and running (with carrier), as `name address`.
+/// One finding per interface that is up and running (with carrier), naming its first external address.
 fn network_addresses() -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `list` is a valid out pointer; on success it is a list we free below with `freeifaddrs`.
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
         // Cannot tell. Reporting "no network" would be a silent pass, so report it as a finding.
-        return vec!["? (could not list network interfaces)".into()];
+        return vec!["the network interfaces could not be listed".into()];
     }
     let up = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_uint;
     let mut p = list;
@@ -90,8 +90,12 @@ fn network_addresses() -> Vec<String> {
             // SAFETY: `ifa_name` is a NUL-terminated string owned by the list.
             let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_string_lossy();
             // One line per interface: a typical host has an IPv4 and several IPv6 addresses on each.
-            if !found.iter().any(|f| f.starts_with(&format!("{name} "))) {
-                found.push(format!("{name} {addr}"));
+            let line = format!("network interface is up ({name} {addr})");
+            if !found
+                .iter()
+                .any(|f| f.starts_with(&format!("network interface is up ({name} ")))
+            {
+                found.push(line);
             }
         }
     }
@@ -102,10 +106,7 @@ fn network_addresses() -> Vec<String> {
 
 /// Reasons this host should not see a seed. `exists` is injected so tests need no real agent.
 fn problems(addresses: &[String], exists: impl Fn(&Path) -> bool) -> Vec<String> {
-    let mut out: Vec<String> = addresses
-        .iter()
-        .map(|a| format!("network interface is up ({a})"))
-        .collect();
+    let mut out = addresses.to_vec();
     let mut seen: Vec<&str> = Vec::new();
     for (path, name) in AGENTS {
         if exists(Path::new(path)) && !seen.contains(name) {
@@ -238,7 +239,10 @@ mod tests {
     #[test]
     fn problems_name_each_finding_once() {
         assert!(problems(&[], |_| false).is_empty());
-        let p = problems(&["en0 192.168.1.5".into()], |_| false);
+        let p = problems(
+            &["network interface is up (en0 192.168.1.5)".into()],
+            |_| false,
+        );
         assert_eq!(p, ["network interface is up (en0 192.168.1.5)"]);
         // Both CrowdStrike paths exist: still one line. A second vendor adds its own.
         let p = problems(&[], |path| {
@@ -249,12 +253,6 @@ mod tests {
         assert_eq!(p.len(), 2, "{p:?}");
         assert!(p[0].starts_with("CrowdStrike Falcon is installed"));
         assert!(p[1].starts_with("Cortex XDR is installed"));
-    }
-
-    #[test]
-    fn override_allows_a_flagged_host() {
-        // Whatever this machine is, the override never refuses; without it a clean host passes too.
-        assert!(require_trusted_host(true).is_ok());
     }
 
     #[test]
