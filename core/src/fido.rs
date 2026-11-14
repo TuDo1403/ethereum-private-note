@@ -141,6 +141,31 @@ pub fn check_cred_id(cred_id: &str) -> Result<(), String> {
         .map_err(|_| "credential id is not valid base64".to_string())
 }
 
+/// `fido2-token -L -k` output: one `<index>: <credential id> <display name> <user id> <type> <protection>`
+/// line per credential (`%02u: %s %s %s %s %s %s` in libfido2's tools/token.c; fido2-token(1) does not
+/// document it). Only the id is taken; anything of another shape (including the tool's own
+/// `<skipped: ...>` lines) is an error, so a credential is never silently missed.
+fn parse_credentials(out: &str) -> Result<Vec<String>, String> {
+    out.lines()
+        .map(|line| {
+            let id = line
+                .split_once(": ")
+                .filter(|(index, _)| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .filter(|id| check_cred_id(id).is_ok())
+                .ok_or("fido2-token: unexpected credential listing")?;
+            Ok(id.to_string())
+        })
+        .collect()
+}
+
+/// The credential ids the key holds for rpId `localhost`: PIN required, no touch. Backup uses it to prove
+/// that two YubiKey shares are on different physical keys. Prints nothing itself.
+pub fn credentials(device: Option<&str>) -> Result<Vec<String>, String> {
+    let dev = device_path(device)?;
+    parse_credentials(&run("fido2-token", &["-L", "-k", RP_ID, &dev], "")?)
+}
+
 /// The key's 32-byte hmac-secret for this credential: PIN and touch required.
 pub fn secret(cred_id: &str, device: Option<&str>) -> Result<[u8; 32], String> {
     check_cred_id(cred_id)?;
@@ -197,6 +222,29 @@ mod tests {
         ] {
             assert!(parse_assert(&assert_out(&bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn credential_listing_is_parsed() {
+        // fido2-token -L -k prints "%02u: %s %s %s %s %s %s" per credential: index, credential id, display
+        // name, user id, type, protection (libfido2 tools/token.c, read from the 1.17 binary's format strings).
+        let out = "00: Zm9vYmFy backup AQID es256 uvopt\n01: YmF6 backup BAUG es256 uvopt\n";
+        assert_eq!(parse_credentials(out).unwrap(), ["Zm9vYmFy", "YmF6"]);
+        assert_eq!(parse_credentials("").unwrap(), Vec::<String>::new());
+        assert!(parse_credentials("00: not-base64! x y z w\n").is_err());
+        // Another shape is an error, not skipped: a missing index, a non-numeric index, no id, tool's own
+        // "<skipped: ...>" marker.
+        for bad in [
+            "Zm9vYmFy backup AQID es256 uvopt\n",
+            "ab: Zm9vYmFy backup\n",
+            "00:\n",
+            "00: \n",
+            "00: <skipped: bad cbor>\n",
+        ] {
+            assert!(parse_credentials(bad).is_err(), "{bad:?}");
+        }
+        // One bad line spoils the whole listing.
+        assert!(parse_credentials("00: Zm9vYmFy a b c d\n01: !! a b c d\n").is_err());
     }
 
     #[test]
