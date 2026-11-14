@@ -65,8 +65,7 @@ each record has its own pads even though the YubiKey's secret is the same for ev
 | `core/` (`epn-core`) | the format: Argon2id, HKDF, GF(2^8) Shamir, AES-GCM, BIP39 words, FIDO2 via libfido2 |
 | `vault/` (`vault`) | interactive wizard: **backup** and guided **restore** (v1, 2-of-3) |
 | `recover/` (`recover`) | small, scriptable **restore-only** tool for v1 and v2 records; the one to keep for emergencies |
-| `publish/` (`publish`) | online step: stores a record in the `BlobStore` contract via a throwaway gas key ([details](publish/README.md)) |
-| `src/BlobStore.sol` | write-once `mapping(address => bytes)`, no owner, no upgrades |
+| `publish/` (`publish`) | online step: deploys the record as contract code from a throwaway gas key ([details](publish/README.md)) |
 | `SPEC.md` | the backup format, v1 (2-of-3) and v2 (k-of-n) |
 | `vendor/` | every Rust dependency, pinned and vendored, so this builds offline years from now |
 
@@ -79,7 +78,7 @@ Requirements:
   YubiKey is used:
   - macOS: `brew install libfido2`
   - Debian/Ubuntu: `apt install fido2-tools`
-- **Foundry** (optional): `cast` to read the record back from a chain, `forge`/`anvil` for tests.
+- **Foundry** (optional): `cast` to read the record back from a chain, `anvil` for tests.
 - On Linux, `publish` uses the system OpenSSL for https RPCs.
 
 Build all three binaries from the vendored sources, no network needed:
@@ -122,14 +121,8 @@ because you are now one loss away from losing the seed.
 ### Choosing a chain
 
 The chain is one durable copy of the public record, not the only one. Pick one you expect to be
-alive and readable for decades, with cheap storage of ~150 bytes. The contract address is the same on
-every EVM chain that has the standard CREATE2 deployer (`0x4e59b448...b4956c`):
-
-```
-BlobStore: 0x0356F8a3FD7ef15B775896B63f822307547D8971
-```
-
-`publish` deploys it there if it is missing and refuses existing code there unless its hash matches.
+alive and readable for decades, with cheap storage of ~150 bytes. Any EVM chain works: the record is
+stored as the code of a new contract, so nothing needs to be deployed on the chain beforehand.
 
 ## Making a backup
 
@@ -155,7 +148,7 @@ On the **offline** machine, with the YubiKey plugged in:
 6. **Public files.** `./backup-<timestamp>/record.hex` and `./backup-<timestamp>/recovery-sheet.txt`
    are written. Both are public.
 
-The recovery sheet holds the record, the credential id and blanks for chain id, contract and sender.
+The recovery sheet holds the record, the credential id and blanks for the chain id and the record's address.
 Print it, together with `SPEC.md`.
 
 Then clear the terminal scrollback, and shut down the offline machine (or reboot the live OS).
@@ -163,8 +156,8 @@ Then clear the terminal scrollback, and shut down the offline machine (or reboot
 ## Publishing the record on chain
 
 On the **online** machine, copy only `record.hex` across (USB stick, QR, or retype it: it is public).
-Use `publish` rather than the `cast send` hint that `vault` prints: `publish` pays from a throwaway key
-so the sender address is never tied to your seed, and it sweeps leftover ETH back.
+`publish` pays from a throwaway key so the sending address is never tied to your seed, and it sweeps
+leftover ETH back.
 
 ```bash
 ./publish [--verify-rpc URL] [--confirmations N] [--allow-high-fees] <rpc-url> <record.hex> <refund-address>
@@ -174,9 +167,9 @@ Missing arguments are prompted for. What happens:
 
 1. A throwaway key is created **in memory only**; its address and an `ethereum:<address>@<chain id>?value=<wei>`
    URI are printed. Send that amount from your wallet (check the chain id in the wallet). It waits 15 min.
-2. `BlobStore` is deployed at the canonical address if needed, the record is stored and read back.
+2. The record is deployed as the code of a new contract and read back.
 3. Leftover ETH is swept to the refund address, on every exit after funding, including failures.
-4. Chain id, contract and sender are printed. **Write them on the recovery sheet.**
+4. Chain id and the record's address are printed. **Write them on the recovery sheet.**
 
 Recommended flags:
 
@@ -186,16 +179,15 @@ Recommended flags:
 
 The refund address must start with `0x`, have a valid checksum if mixed-case, and be an EOA (no code).
 Fee quotes over 500 gwei/gas or 0.5 ETH total are refused without `--allow-high-fees`. See
-[`publish/README.md`](publish/README.md) for the full safety behaviour and how to reproduce the
-contract bytecode.
+[`publish/README.md`](publish/README.md) for the full safety behaviour.
 
 Afterwards, check from a node you trust:
 
 ```bash
-cast call 0x0356F8a3FD7ef15B775896B63f822307547D8971 "records(address)(bytes)" <sender> --rpc-url <rpc>
+cast code <address> --rpc-url <rpc>
 ```
 
-The output must equal the contents of `record.hex`.
+The output must be `0x00` followed by the contents of `record.hex` (without its `0x`).
 
 ## Testing the backup
 
@@ -354,12 +346,12 @@ address that is not tied to you.
 `publish` sends only public data and transactions signed by the throwaway key, so an RPC cannot steal
 a secret. It can censor or delay, quote inflated fees (bounded by the fee caps), or claim a store
 succeeded when it did not. Use `--verify-rpc` with an independent node, and always re-check the record
-with `cast call` against a node you trust before relying on it.
+with `cast code` against a node you trust before relying on it.
 
 ### Long-term recoverability
 
 - Keep the record in several places besides the chain: the recovery sheet, email, cloud storage.
-  Reading it from the chain needs chain id, contract and sender, which no factor can regenerate.
+  Reading it from the chain needs the chain id and the record's address, which no factor can regenerate.
 - Keep `SPEC.md` printed with share C, and keep a copy of this repository (with `vendor/`) somewhere
   durable. `recover` builds offline from it.
 - v1 records stay valid forever; a future format must change the version byte.
@@ -371,7 +363,6 @@ with `cast call` against a node you trust before relying on it.
   test run on a testnet before mainnet. Legacy (non-EIP-1559) chains are unsupported.
 - **Backups are v1 (2-of-3) only.** The v2 k-of-n format is specified and `recover` restores it, but no
   tool creates v2 records yet, and `publish` accepts only 147-byte v1 records.
-- `vault` prints a `cast send` hint for publishing; prefer `publish`, which uses a throwaway sender.
 - `recover` does not wipe secrets from memory after use (`vault` does).
 - One YubiKey per v1 backup; a v1 backup has no second hardware factor.
 
@@ -379,12 +370,7 @@ with `cast call` against a node you trust before relying on it.
 
 ```bash
 cargo test --offline --locked     # unit, format vectors, CLI, and anvil end-to-end tests
-forge test                        # BlobStore contract tests
 ```
 
 The test profile builds with `opt-level = 3` because the real-parameter vector runs Argon2id at
 1 GiB. The anvil tests in `publish/` skip if `anvil` is not installed.
-
-The `BlobStore` bytecode, and therefore its address, is pinned by `foundry.toml` (solc 0.8.28, paris,
-optimizer 200, no metadata). If the contract or compiler settings change, the canonical address
-changes; see `publish/README.md` for how to regenerate and verify the constants.

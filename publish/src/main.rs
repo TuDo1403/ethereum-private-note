@@ -46,9 +46,8 @@ fn run() -> Result<(), String> {
 
     println!("\nPublished. Put these on the recovery sheet:");
     println!("  chain id:  {}", out.chain_id);
-    println!("  contract:  {}", out.contract);
-    println!("  sender:    {}", out.sender);
-    println!("  read:      cast call {} \"records(address)(bytes)\" {} --rpc-url <RPC>", out.contract, out.sender);
+    println!("  address:   {}", out.address);
+    println!("  read:      cast code {} --rpc-url <RPC>   (the code is 0x00 followed by the record)", out.address);
     Ok(())
 }
 

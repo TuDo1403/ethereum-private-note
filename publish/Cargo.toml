@@ -9,7 +9,7 @@ rust-version = "1.94"
 [dependencies]
 # No default features: they pull rustls -> aws-lc-sys (a C build) for https. native-tls uses the OS TLS
 # (Security.framework on macOS; system OpenSSL on Linux). "essentials" = HTTP provider, local signer,
-# sol! contract bindings, rpc types.
+# rpc types.
 alloy = { version = "=2.5.0", default-features = false, features = ["essentials", "std", "reqwest", "reqwest-native-tls"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time"] }
 

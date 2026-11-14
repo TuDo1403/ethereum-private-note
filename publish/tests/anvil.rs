@@ -1,12 +1,12 @@
 //! End-to-end against a local anvil. Skipped (with a message) when `anvil` is not installed.
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, Bytes, U256, address},
+    primitives::{Address, U256, address},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
 };
-use epn_publish::{BlobStore, CANONICAL_ADDRESS, CREATE2_DEPLOYER, FundRequest, Options, RECORD_LEN, publish as run};
+use epn_publish::{FundRequest, Options, RECORD_LEN, publish as run};
 use std::sync::{Arc, Mutex};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -87,45 +87,44 @@ fn record(seed: u8) -> Vec<u8> {
     (0..RECORD_LEN).map(|i| seed.wrapping_add(i as u8)).collect()
 }
 
+/// What a restore reads: the code at the address is `0x00 || record`.
+async fn stored(p: &impl Provider, at: Address) -> Vec<u8> {
+    let code = p.get_code_at(at).await.unwrap();
+    assert_eq!(code.first(), Some(&0), "code must start with the STOP byte");
+    code[1..].to_vec()
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn deploys_stores_reads_back_and_sweeps_then_reuses_contract() {
+async fn deploys_record_as_code_reads_back_and_sweeps() {
     let Some(anvil) = start_anvil().await else { return };
     let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
 
     let rec = record(1);
     let out = run_funded(&anvil.1, &rec).await.unwrap();
-    assert!(out.deployed_now);
-    assert_eq!(out.contract, CANONICAL_ADDRESS);
+    assert_eq!(out.address, out.sender.create(0));
     assert!(out.swept > U256::ZERO);
     assert_eq!(p.get_balance(REFUND).await.unwrap(), out.swept);
     // Sender is drained to (almost) nothing: only the sweep's fee headroom may remain.
     assert!(p.get_balance(out.sender).await.unwrap() < U256::from(10u64).pow(U256::from(16)));
-    let stored: Bytes = BlobStore::new(CANONICAL_ADDRESS, &p).records(out.sender).call().await.unwrap();
-    assert_eq!(stored.as_ref(), rec.as_slice());
+    assert_eq!(stored(&p, out.address).await, rec);
 
-    // Second run: new throwaway sender, contract already there -> no deployment.
+    // Second run: new throwaway sender, new address; the first record is untouched.
     let rec2 = record(77);
     let out2 = run_funded(&anvil.1, &rec2).await.unwrap();
-    assert!(!out2.deployed_now);
-    assert_ne!(out.sender, out2.sender);
-    let stored2: Bytes = BlobStore::new(CANONICAL_ADDRESS, &p).records(out2.sender).call().await.unwrap();
-    assert_eq!(stored2.as_ref(), rec2.as_slice());
+    assert_ne!(out.address, out2.address);
+    assert_eq!(stored(&p, out2.address).await, rec2);
+    assert_eq!(stored(&p, out.address).await, rec);
 }
 
+/// EIP-3541 rejects code that starts with 0xEF; the STOP prefix must make such a record deployable.
 #[tokio::test(flavor = "multi_thread")]
-async fn refuses_wrong_code_at_canonical_address() {
+async fn record_starting_with_0xef_deploys() {
     let Some(anvil) = start_anvil().await else { return };
-    set_code(&anvil.1, CANONICAL_ADDRESS, "0x6000").await;
-    let err = run_funded(&anvil.1, &record(1)).await.unwrap_err();
-    assert!(err.contains("unexpected hash"), "{err}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn stops_when_create2_deployer_is_missing() {
-    let Some(anvil) = start_anvil().await else { return };
-    set_code(&anvil.1, CREATE2_DEPLOYER, "0x").await;
-    let err = run_funded(&anvil.1, &record(1)).await.unwrap_err();
-    assert!(err.contains("CREATE2 deployer"), "{err}");
+    let mut rec = record(1);
+    rec[0] = 0xef;
+    let out = run_funded(&anvil.1, &rec).await.unwrap();
+    let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
+    assert_eq!(stored(&p, out.address).await, rec);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -137,7 +136,7 @@ async fn refund_with_code_or_special_address_is_rejected_before_funding() {
     let err = run(&opts(&anvil.1), &record(1), move |_: &FundRequest| *a2.lock().unwrap() += 1).await.unwrap_err();
     assert!(err.contains("has code"), "{err}");
     let mut o = opts(&anvil.1);
-    o.refund = CANONICAL_ADDRESS;
+    o.refund = Address::ZERO;
     assert!(run(&o, &record(1), |_: &FundRequest| {}).await.unwrap_err().contains("refund address must be"));
     assert_eq!(*asked.lock().unwrap(), 0, "must fail before asking for funds");
 }
@@ -145,7 +144,7 @@ async fn refund_with_code_or_special_address_is_rejected_before_funding() {
 #[tokio::test(flavor = "multi_thread")]
 async fn failure_after_funding_still_sweeps() {
     let (Some(a), Some(b)) = (start_anvil().await, start_anvil().await) else { return };
-    // Read-back goes to a different chain state (b never saw the record): the flow fails AFTER storing.
+    // Read-back goes to a different chain state (b never saw the record): the flow fails AFTER deploying.
     let mut o = opts(&a.1);
     o.verify_rpc_url = Some(&b.1);
     let err = run_funded_opts(&o, &record(5), 100).await.unwrap_err();
@@ -160,8 +159,7 @@ async fn second_rpc_can_verify_and_confirmations_are_awaited() {
     let mut o = opts(&a.1);
     o.verify_rpc_url = Some(&a.1);
     o.confirmations = 2;
-    let out = run_funded_opts(&o, &record(9), 100).await.unwrap();
-    assert!(out.deployed_now);
+    run_funded_opts(&o, &record(9), 100).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -173,7 +171,6 @@ async fn funding_timeout_sweeps_partial_funds() {
     assert!(err.contains("timed out") && err.contains("swept"), "{err}");
     let p = ProviderBuilder::new().connect(&anvil.1).await.unwrap();
     assert!(p.get_balance(REFUND).await.unwrap() > U256::ZERO);
-    assert!(p.get_code_at(CANONICAL_ADDRESS).await.unwrap().is_empty(), "nothing may be deployed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -181,7 +178,7 @@ async fn fees_are_requoted_after_funding() {
     let Some(anvil) = start_anvil().await else { return };
     let (url, asks) = (anvil.1.clone(), Arc::new(Mutex::new(Vec::<U256>::new())));
     let a2 = asks.clone();
-    let out = run(&opts(&anvil.1), &record(3), move |r: &FundRequest| {
+    run(&opts(&anvil.1), &record(3), move |r: &FundRequest| {
         let n = {
             let mut g = a2.lock().unwrap();
             g.push(r.required_wei);
@@ -200,7 +197,6 @@ async fn fees_are_requoted_after_funding() {
     .unwrap();
     let asks = asks.lock().unwrap();
     assert!(asks.len() >= 2 && asks[1] > asks[0], "expected a larger second ask, got {asks:?}");
-    assert!(out.deployed_now);
 }
 
 #[tokio::test(flavor = "multi_thread")]

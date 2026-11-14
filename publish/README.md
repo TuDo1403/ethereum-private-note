@@ -1,31 +1,22 @@
 # publish (Ethereum Private Note)
 
-Publishes a 147-byte `record.hex` (from `vault`) to the canonical `BlobStore` contract, paying gas from a
+Publishes a 147-byte `record.hex` (from `vault`) as the runtime code of a new contract, paying gas from a
 throwaway key that exists only in memory. Only public data goes on chain.
 
     cargo run --offline --locked -p epn-publish -- [--verify-rpc <url>] [--confirmations <n>] [--allow-high-fees] \
         <rpc-url> <record.hex> <refund-address>
 
 Missing arguments are prompted for. It prints the throwaway address and an `ethereum:` URI, waits (15 min)
-for the funds, deploys `BlobStore` if needed, stores and reads back the record, sweeps the leftover ETH to the
-refund address, then prints chain id, contract and sender for the recovery sheet.
+for the funds, deploys the record, reads the code back, sweeps the leftover ETH to the refund address, then
+prints the chain id and the record's address for the recovery sheet.
 
-**Canonical address** `0x0356F8a3FD7ef15B775896B63f822307547D8971` on every chain: CREATE2 through
-`0x4e59b44847b379578588920ca78fbf26c0b4956c`, salt `keccak256("onchain-safe/BlobStore/v1")` (the project's old name; it is part of the address and must
-never change). Existing code
-there is accepted only if its hash is `RUNTIME_CODE_HASH`. A chain without the CREATE2 deployer is refused.
+**Storage:** the contract's code is `0x00 || record`, created from the throwaway key at nonce 0, so the
+address is `keccak256(rlp([sender, 0]))[12..]`. No contract has to exist on the chain beforehand and nothing
+is compiled. Read it with `cast code <address>`. The creation code and the reason for the `00` byte are in
+`SPEC.md` ("On-chain storage").
 
-**Reproduce the bytecode** (solc 0.8.28, paris, optimizer 200, no metadata; see `foundry.toml`):
-
-    forge build && jq -r .bytecode.object out/BlobStore.sol/BlobStore.json | diff - publish/blobstore.initcode.hex
-    cast keccak "$(cat publish/blobstore.initcode.hex)"                        # INIT_CODE_HASH
-    cast keccak "$(jq -r .deployedBytecode.object out/BlobStore.sol/BlobStore.json)"   # RUNTIME_CODE_HASH
-
-If `src/BlobStore.sol` or the compiler settings change, the address changes: regenerate the hex file and the
-three constants in `src/lib.rs` (a unit test checks they agree).
-
-**Tests:** `forge test` (contract), `cargo test --offline --locked -p publish` (unit + anvil end-to-end; the
-anvil tests skip if `anvil` is not installed).
+**Tests:** `cargo test --offline --locked -p epn-publish` (unit + anvil end-to-end; the anvil tests skip if
+`anvil` is not installed).
 
 ## Safety behaviour
 
@@ -46,10 +37,10 @@ It **cannot** learn or steal anything secret: only the public record and a throw
 through it, and the key never leaves the process. It **can** censor or delay (the run fails, leftovers are swept
 if the RPC allows), quote inflated fees (bounded by the caps above), or claim a record is stored when it is not.
 Use `--verify-rpc` (an independent node, used only for the read-back) and `--confirmations` to reduce that last
-risk. The recovery sheet should always be re-checked with `cast call` against a node you trust.
+risk. The recovery sheet should always be re-checked with `cast code` against a node you trust.
 
 ## Dependencies
 
-alloy is used with `default-features = false` (HTTP provider, local signer, `sol!` bindings, native-tls), which
+alloy is used with `default-features = false` (HTTP provider, local signer, native-tls), which
 avoids the rustls -> aws-lc-sys C build. On Linux, native-tls needs the system OpenSSL for https RPCs.
 `core/` and `recover/` do not depend on alloy.

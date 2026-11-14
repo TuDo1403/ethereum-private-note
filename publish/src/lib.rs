@@ -1,41 +1,18 @@
-//! Publish a 147-byte record to `BlobStore` at its canonical CREATE2 address, paying gas from a
-//! throwaway key that exists only in memory. Flow: check chain -> check/plan deploy -> wait for the
-//! throwaway address to be funded -> (deploy) -> store -> read back -> sweep leftovers.
+//! Publish a 147-byte record as the runtime code of a new contract ("code as data"), paying gas from a
+//! throwaway key that exists only in memory. Flow: check chain -> wait for the throwaway address to be
+//! funded -> deploy (the record becomes the code at `sender.create(0)`) -> read the code back -> sweep leftovers.
 use alloy::{
     network::{Ethereum, TransactionBuilder},
-    primitives::{Address, Bytes, B256, U256, address, b256, keccak256},
+    primitives::{Address, U256},
     providers::{PendingTransactionBuilder, Provider, ProviderBuilder},
     rpc::types::{TransactionReceipt, TransactionRequest},
     signers::local::PrivateKeySigner,
-    sol,
 };
 use std::time::{Duration, Instant};
 
-sol! {
-    #[sol(rpc)]
-    contract BlobStore {
-        function store(bytes calldata record) external;
-        function records(address) external view returns (bytes memory);
-    }
-}
-
 /// Record format v1 size (see SPEC.md).
 pub const RECORD_LEN: usize = 147;
-/// The standard deterministic deployer (Arachnid): calldata = salt (32) ++ init code.
-pub const CREATE2_DEPLOYER: Address = address!("4e59b44847b379578588920ca78fbf26c0b4956c");
-/// keccak256("onchain-safe/BlobStore/v1"). The string keeps the project's old name on purpose: the salt
-/// fixes the canonical address, so changing it would move the contract on every chain.
-pub const SALT: B256 = b256!("7752f52bd595bb427776f5f476d1f1e439316cb4e37afe83e07cae9306a0eff8");
-/// Compiled with the solc settings pinned in foundry.toml; regenerate per publish/README.md.
-const INIT_CODE_HEX: &str = include_str!("../blobstore.initcode.hex");
-pub const INIT_CODE_HASH: B256 = b256!("76194896a2afb0c2a0cae428ac479a92e94dc6410bf1a452626c437aa6024259");
-pub const RUNTIME_CODE_HASH: B256 = b256!("ca12aa270c3fd1a6a08361ec47e57523e4ed8e4aff32001405acb50bb3e8f0de");
-/// CREATE2(CREATE2_DEPLOYER, SALT, INIT_CODE_HASH): the same on every chain.
-pub const CANONICAL_ADDRESS: Address = address!("0356F8a3FD7ef15B775896B63f822307547D8971");
 
-/// Upper bound for `store` of a 147-byte record (~6 cold SSTOREs, ~160k): used only when the
-/// contract is not deployed yet, so it cannot be estimated. A too-low bound would revert the tx.
-const STORE_GAS_UNDEPLOYED: u64 = 300_000;
 const SWEEP_GAS: u64 = 21_000;
 /// Gas limits are the node's estimate plus 20 %.
 const GAS_MARGIN_PCT: u64 = 120;
@@ -69,22 +46,23 @@ pub fn parse_record(text: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// The init code, checked against the committed hash so a corrupted file can never change the address.
-fn init_code() -> Result<Vec<u8>, String> {
-    let code = alloy::hex::decode(INIT_CODE_HEX.trim()).map_err(|e| format!("bad embedded init code: {e}"))?;
-    if keccak256(&code) != INIT_CODE_HASH {
-        return Err("embedded init code does not match INIT_CODE_HASH".into());
-    }
-    Ok(code)
+/// Creation code whose runtime code is `0x00 || record`:
+///   PUSH2 len; DUP1; PUSH1 10; RETURNDATASIZE (0); CODECOPY; RETURNDATASIZE (0); RETURN; then the data.
+/// The 10-byte prefix is why the copy starts at offset 10. The leading 0x00 (STOP) keeps the data from ever
+/// executing and, more importantly, keeps the code from starting with 0xEF, which EIP-3541 rejects: without
+/// it about 1 in 256 random records would fail to deploy.
+fn deploy_code(record: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(record.len() + 1).expect("record is far below the 24576-byte code limit");
+    [&[0x61][..], &len.to_be_bytes(), &[0x80, 0x60, 0x0a, 0x3d, 0x39, 0x3d, 0xf3, 0x00], record].concat()
 }
 
 /// What the run produced; everything the recovery sheet needs.
 #[derive(Debug)]
 pub struct Outcome {
     pub chain_id: u64,
-    pub contract: Address,
+    /// Where the record lives: its code is `0x00 || record`. Derived from the sender, which is not needed again.
+    pub address: Address,
     pub sender: Address,
-    pub deployed_now: bool,
     /// Wei returned to the refund address (0 if nothing was left to sweep).
     pub swept: U256,
 }
@@ -137,7 +115,6 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
     if record.len() != RECORD_LEN {
         return Err(format!("record is {} bytes, expected {RECORD_LEN}", record.len()));
     }
-    let init = init_code()?;
 
     // The signer (and every clone the provider holds) is dropped when this function returns;
     // k256's SigningKey zeroizes itself on drop. Nothing here ever prints or stores the key.
@@ -157,42 +134,18 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
 
     // A sweep to an address with code runs that code and can exceed the fixed 21000 gas: refuse early.
     let refund = opts.refund;
-    if [Address::ZERO, sender, CANONICAL_ADDRESS, CREATE2_DEPLOYER].contains(&refund) {
-        return Err("refund address must be your own plain account, not zero/the sender/a contract of this tool".into());
+    if [Address::ZERO, sender].contains(&refund) {
+        return Err("refund address must be your own plain account, not zero or the sender".into());
     }
     if !provider.get_code_at(refund).await.map_err(e("get code"))?.is_empty() {
         return Err("refund address has code (contract or delegated account); the sweep could fail, use a plain account".into());
     }
 
-    // Deployment state: absent -> deploy; present -> must be exactly our bytecode.
-    let code = provider.get_code_at(CANONICAL_ADDRESS).await.map_err(e("get code"))?;
-    let need_deploy = if code.is_empty() {
-        if provider.get_code_at(CREATE2_DEPLOYER).await.map_err(e("get code"))?.is_empty() {
-            return Err(format!("CREATE2 deployer {CREATE2_DEPLOYER} is not deployed on chain {chain_id}"));
-        }
-        true
-    } else if keccak256(&code) != RUNTIME_CODE_HASH {
-        return Err(format!("code at {CANONICAL_ADDRESS} has an unexpected hash; refusing to use it"));
-    } else {
-        eprintln!("BlobStore already deployed at {CANONICAL_ADDRESS}, runtime hash verified");
-        false
-    };
-
-    // Gas estimates are made once (an unfunded `from` is fine: no gas price is set on the request).
-    let with_margin = |g: u64| g.saturating_mul(GAS_MARGIN_PCT) / 100;
-    let store = BlobStore::new(CANONICAL_ADDRESS, &provider);
-    let deploy_tx = TransactionRequest::default().with_to(CREATE2_DEPLOYER).with_input([SALT.as_slice(), &init].concat());
-    let deploy_gas = if need_deploy {
-        with_margin(provider.estimate_gas(deploy_tx.clone().with_from(sender)).await.map_err(e("deploy gas estimate"))?)
-    } else {
-        0
-    };
-    let store_gas = if need_deploy {
-        STORE_GAS_UNDEPLOYED
-    } else {
-        with_margin(store.store(Bytes::copy_from_slice(record)).from(sender).estimate_gas().await.map_err(e("store gas estimate"))?)
-    };
-    let gas_total = deploy_gas + store_gas + SWEEP_GAS;
+    // The estimate is made once (an unfunded `from` is fine: no gas price is set on the request).
+    let deploy_tx = TransactionRequest::default().with_deploy_code(deploy_code(record));
+    let deploy_gas = provider.estimate_gas(deploy_tx.clone().with_from(sender)).await.map_err(e("deploy gas estimate"))?;
+    let deploy_gas = deploy_gas.saturating_mul(GAS_MARGIN_PCT) / 100;
+    let gas_total = deploy_gas + SWEEP_GAS;
 
     // From the moment funds can arrive, EVERY exit must go through the sweep below.
     let work = async {
@@ -220,37 +173,25 @@ async fn run(opts: &Options<'_>, record: &[u8], on_fund: &mut dyn FnMut(&FundReq
             tokio::time::sleep(Duration::from_secs(2)).await;
         };
 
-        if need_deploy {
-            let tx = deploy_tx.with_gas_limit(deploy_gas).with_max_fee_per_gas(max_fee).with_max_priority_fee_per_gas(tip).with_nonce(next_nonce(&provider, sender).await?);
-            let pending = provider.send_transaction(tx).await.map_err(e("send deploy"))?;
-            let receipt = confirmed(pending, "deploy", sender, opts.confirmations).await?;
-            let code = provider.get_code_at(CANONICAL_ADDRESS).await.map_err(e("get code"))?;
-            if keccak256(&code) != RUNTIME_CODE_HASH {
-                return Err(format!("after deploy, code at {CANONICAL_ADDRESS} does not match the expected hash"));
-            }
-            eprintln!("deployed BlobStore at {CANONICAL_ADDRESS} (tx {})", receipt.transaction_hash);
+        // The sender is brand new, so this is nonce 0, but the address is derived from whatever nonce is used.
+        let nonce = next_nonce(&provider, sender).await?;
+        let address = sender.create(nonce);
+        let tx = deploy_tx.with_gas_limit(deploy_gas).with_max_fee_per_gas(max_fee).with_max_priority_fee_per_gas(tip).with_nonce(nonce);
+        let pending = provider.send_transaction(tx).await.map_err(e("send deploy"))?;
+        let receipt = confirmed(pending, "deploy", sender, opts.confirmations).await?;
+        if receipt.contract_address != Some(address) {
+            return Err(format!("deploy tx created {:?}, expected {address}", receipt.contract_address));
         }
-
-        let pending = store
-            .store(Bytes::copy_from_slice(record))
-            .gas(store_gas)
-            .max_fee_per_gas(max_fee)
-            .max_priority_fee_per_gas(tip)
-            .nonce(next_nonce(&provider, sender).await?)
-            .send()
-            .await
-            .map_err(e("send store"))?;
-        let receipt = confirmed(pending, "store", sender, opts.confirmations).await?;
-        read_back(&reader, sender, record).await?;
-        eprintln!("stored and verified (tx {})", receipt.transaction_hash);
-        Ok(())
+        read_back(&reader, address, record).await?;
+        eprintln!("stored and verified at {address} (tx {})", receipt.transaction_hash);
+        Ok(address)
     }
     .await;
 
     let swept = sweep(&provider, sender, refund).await;
     match (work, swept) {
-        (Ok(()), Ok(swept)) => Ok(Outcome { chain_id, contract: CANONICAL_ADDRESS, sender, deployed_now: need_deploy, swept }),
-        (Ok(()), Err(s)) => Err(format!("record is stored, but the sweep failed: {s}. Leftover ETH is stranded at {sender}")),
+        (Ok(address), Ok(swept)) => Ok(Outcome { chain_id, address, sender, swept }),
+        (Ok(_), Err(s)) => Err(format!("record is stored, but the sweep failed: {s}. Leftover ETH is stranded at {sender}")),
         (Err(w), Ok(v)) if v.is_zero() => Err(format!("{w} (nothing to sweep)")),
         (Err(w), Ok(v)) => Err(format!("{w} (swept {v} wei back to {refund})")),
         (Err(w), Err(s)) => Err(format!("{w}; ALSO the sweep failed: {s}. Funds may be stranded at {sender}")),
@@ -296,22 +237,22 @@ async fn confirmed(pending: PendingTransactionBuilder<Ethereum>, what: &str, sen
     Ok(receipt)
 }
 
-/// Read `records(sender)` and require it to equal the record. An empty answer is retried (a
+/// Read the code at `address` and require it to be `0x00 || record`. An empty answer is retried (a
 /// load-balanced node can lag the receipt); a different non-empty answer fails at once.
-async fn read_back(reader: &impl Provider, sender: Address, record: &[u8]) -> Result<(), String> {
+async fn read_back(reader: &impl Provider, address: Address, record: &[u8]) -> Result<(), String> {
     let mut last = String::new();
     for attempt in 0..READBACK_TRIES {
         if attempt > 0 {
             tokio::time::sleep(READBACK_DELAY).await;
         }
-        match BlobStore::new(CANONICAL_ADDRESS, reader).records(sender).call().await {
-            Ok(b) if b.as_ref() == record => return Ok(()),
-            Ok(b) if !b.is_empty() => return Err("record read back from chain differs from the record sent".into()),
+        match reader.get_code_at(address).await {
+            Ok(c) if c.first() == Some(&0) && c[1..] == *record => return Ok(()),
+            Ok(c) if !c.is_empty() => return Err("code read back from chain differs from the record sent".into()),
             Ok(_) => last = "empty".into(),
             Err(err) => last = err.to_string(),
         }
     }
-    Err(format!("read-back of records(sender) failed after {READBACK_TRIES} tries: {last}"))
+    Err(format!("read-back of the code at {address} failed after {READBACK_TRIES} tries: {last}"))
 }
 
 /// Send everything above the fee to `refund`; returns the wei sent (0 = nothing worth sending).
@@ -352,12 +293,15 @@ async fn sweep(p: &impl Provider, sender: Address, refund: Address) -> Result<U2
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::address;
 
     #[test]
-    fn constants_are_consistent() {
-        let init = init_code().unwrap();
-        assert_eq!(CANONICAL_ADDRESS, CREATE2_DEPLOYER.create2(SALT, keccak256(&init)));
-        assert_eq!(SALT, keccak256("onchain-safe/BlobStore/v1"));
+    fn deploy_code_layout() {
+        let rec = [0xefu8; RECORD_LEN]; // starts with 0xEF on purpose: the 0x00 prefix must protect it
+        let code = deploy_code(&rec);
+        assert_eq!(&code[..3], &[0x61, 0x00, 0x94]); // PUSH2 148 = 1 + 147
+        assert_eq!(code[10], 0x00); // the copy offset 0x0a lands exactly on the STOP byte
+        assert_eq!(&code[11..], &rec);
     }
 
     #[test]

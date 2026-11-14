@@ -96,8 +96,8 @@ fn sheet(record_hex: &str, cred_id: &str) -> String {
         "Recovery sheet. Nothing here is secret: keep several copies (paper, email, cloud).\n\n\
          record:     0x{record_hex}\n\
          credential: {cred_id}   (YubiKey, rpId localhost)\n\
-         chain id: ________   contract: ________   sender: ________\n\n\
-         read:       cast call $STORE \"records(address)(bytes)\" $SENDER --rpc-url $RPC\n\
+         chain id: ________   address: ________\n\n\
+         read:       cast code $ADDRESS --rpc-url $RPC   (0x00, then the record)\n\
          restore:    printf '%s\\n%s' \"$SHARE_C_WORDS\" \"$PASS\" | recover restore <record> --cred-id {cred_id}\n\
          format:     SPEC.md (print it with this sheet)\n\n\
          Any two of: passphrase, YubiKey (+ its PIN), share C restore the seed.\n"
@@ -370,10 +370,9 @@ fn backup(device: Option<String>) -> Result<(), String> {
 
     println!("6/6 Saved two PUBLIC files in ./{dir}/ : record.hex and recovery-sheet.txt\n");
     println!("Next (online, no secrets needed):");
-    println!("  1. send the record to a chain:");
-    println!("       cast send $STORE \"store(bytes)\" $(cat {dir}/record.hex) --rpc-url $RPC --account $SENDER");
-    println!("     (use a fresh sender address that is not derived from your seed)");
-    println!("  2. fill chain id, contract and sender into the recovery sheet; keep several copies");
+    println!("  1. deploy the record as contract code, from a throwaway key:");
+    println!("       publish $RPC {dir}/record.hex <refund-address>");
+    println!("  2. fill chain id and the printed address into the recovery sheet; keep several copies");
     println!("  3. TEST a restore now, with your paper, before you trust this backup:");
     println!("       printf '%s\\n%s' \"$SHARE_C_WORDS\" \"$PASS\" | recover restore $(cat {dir}/record.hex)");
     Ok(())

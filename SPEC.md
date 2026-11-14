@@ -7,7 +7,7 @@ value; an implementation is correct if it reproduces them. Print this with share
 
 All integers big endian. Hex has no `0x` prefix. `||` is concatenation.
 
-## Record (147 bytes, stored with `BlobStore.store(bytes)`, read with `records(address)(bytes)`)
+## Record (147 bytes, stored as contract code: `0x00 || record`, read with `eth_getCode`)
 
 | bytes   | field    | meaning                                                      |
 |---------|----------|--------------------------------------------------------------|
@@ -59,12 +59,25 @@ byte 0 is the entropy length (16, 20, 24, 28 or 32), then the entropy zero-padde
 The entropy is the BIP39 entropy of the seed words (checksum words are recomputed, not stored).
 The BIP39 passphrase ("25th word") is not part of this backup.
 
+## On-chain storage
+
+The record is the runtime code of a new contract, so it lives in state (not in a transaction's history, which
+nodes may expire). The code is `0x00 || record`: the leading STOP byte keeps the data from ever executing and
+keeps the code from starting with `0xEF`, which EIP-3541 rejects. The creation code is
+
+    61 LLLL 80 60 0a 3d 39 3d f3 00 || record      (LLLL = 1 + record length, big endian)
+
+i.e. PUSH2 len, DUP1, PUSH1 10, RETURNDATASIZE, CODECOPY, RETURNDATASIZE, RETURN, then the data. The contract
+is created from a throwaway account at nonce 0, so its address is `keccak256(rlp([sender, 0]))[12..]`. To read
+it back, call `eth_getCode(address)` (`cast code <address>`) and drop the first byte. Nothing else is needed:
+no ABI, no deployed helper contract.
+
 ## Where the record lives
 
 The record is public by design, so keep copies anywhere: its hex printed with share C, email, cloud.
 The chain is one durable copy, not the only one. Reading the chain copy needs three public values that
-no factor can regenerate: chain id, `BlobStore` address and the sender address. Write them next to
-share C. The sender must not be an address you can only derive from the backed-up seed.
+no factor can regenerate: the chain id and the address of the contract whose code holds the record
+(see "On-chain storage"). Write them next to share C.
 
 Using the YubiKey also needs its credential id (base64, printed by `recover enroll` and on the recovery
 sheet). It is not secret and is useless without the key. If the sheet is lost it can be listed from the
