@@ -14,6 +14,7 @@ mod prompt;
 mod restore;
 
 use clap::{Parser, Subcommand};
+use epn_core::host;
 use prompt::{choose, clear};
 use std::io::IsTerminal;
 
@@ -27,6 +28,9 @@ struct Cli {
     /// FIDO2 device path, when several keys are plugged in (see `fido2-token -L`)
     #[arg(long, global = true, value_name = "PATH")]
     device: Option<String>,
+    /// Continue even though this host is online or has a monitoring agent (keyloggers see everything)
+    #[arg(long, global = true)]
+    allow_unsafe_host: bool,
 }
 
 #[derive(Subcommand)]
@@ -47,10 +51,18 @@ fn run() -> Result<(), String> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err("vault is interactive: run it in a terminal, not through a pipe".into());
     }
+    for w in host::harden() {
+        eprintln!("warning: {w}");
+    }
+    // `op-store` is the one online step: only share 2 is typed, on a machine that never holds another factor.
+    if let Some(Cmd::OpStore { sheet }) = &cli.command {
+        return backup::op_store(sheet);
+    }
+    host::require_trusted_host(cli.allow_unsafe_host)?;
     let backup = match cli.command {
         Some(Cmd::Backup) => true,
         Some(Cmd::Restore) => false,
-        Some(Cmd::OpStore { sheet }) => return backup::op_store(&sheet),
+        Some(Cmd::OpStore { .. }) => unreachable!("returned above"),
         None => {
             clear();
             choose(

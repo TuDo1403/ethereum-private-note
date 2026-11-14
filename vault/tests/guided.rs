@@ -14,7 +14,15 @@ set timeout 300
 proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
 # rpassword prints its prompt before it turns echo off; a person types later than that, a script must
 # wait, or the pty echoes the "hidden" seed into the transcript that the test checks for leaks.
-proc secret {s} { sleep 0.3; send "$s\r" }
+# A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
+# echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
+proc secret {s} {
+    for {set i 0} {$i < 200} {incr i} {
+        if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
+        sleep 0.05
+    }
+    send "$s\r"
+}
 # Menus and y/n questions (dialoguer) read keys in raw mode once drawn: wait for the prompt, pause like a
 # person, then press keys. `pick n` moves down n items and presses Enter.
 proc pick {prompt n} { expect -ex $prompt; sleep 0.3; send [string repeat "\033\[B" $n]; send "\r" }
@@ -30,7 +38,7 @@ proc words_of {block} {
 "#;
 
 const SCRIPT: &str = r#"
-spawn $env(VAULT) backup --device /dev/fake
+spawn $env(VAULT) --allow-unsafe-host backup --device /dev/fake
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 if {![file isdirectory $dir]} { fail "output folder not made before the start" }
@@ -67,7 +75,7 @@ expect "publish <rpc-url>"
 expect eof
 
 # Verify only: the papers open the record, the fingerprint is shown, the seed is not.
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -87,7 +95,7 @@ puts "\nDIR=$dir FP=$fp"
 /// then `vault op-store` (twice: the second run must find the item, not duplicate it), then a verify-only
 /// restore from the 1Password share and the paper share (no passphrase, so no Argon2 in the restore).
 const SCRIPT_1PASSWORD: &str = r#"
-spawn $env(VAULT) backup
+spawn $env(VAULT) --allow-unsafe-host backup
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 expect -re {saved in \./(backup-[0-9]+)/} { set dir $expect_out(1,string) }
 expect "offline and ready."; send "\r"
@@ -133,7 +141,7 @@ type_words $shareb
 expect "already in 1Password"
 expect eof
 
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"
@@ -149,7 +157,7 @@ expect eof
 
 # A failing `op read` (locked, Touch ID cancelled) must not end the restore: it falls back to the paper.
 set env(FAKE_OP_READ_FAILS) 1
-spawn $env(VAULT) restore
+spawn $env(VAULT) --allow-unsafe-host restore
 expect_after { timeout { fail "timeout" } eof { fail "unexpected end" } }
 pick "What should this run do?" 0
 expect "record.hex: "; send "$dir/record.hex\r"

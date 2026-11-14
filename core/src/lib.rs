@@ -6,9 +6,11 @@
 //! - `shamir`: GF(2^8) arithmetic and polynomial shares (private to this crate).
 //! - `bip39`: the English word list, as seed words, paper shares and the generated passphrase.
 //! - `fido`: the hardware secret from a YubiKey through libfido2's command-line tools.
+//! - `host`: process hardening and the check that the machine is offline and unmonitored.
 
 pub mod bip39;
 pub mod fido;
+pub mod host;
 pub mod record;
 mod shamir;
 

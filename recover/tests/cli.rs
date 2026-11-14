@@ -8,8 +8,10 @@ fn cli(args: &[&str], stdin: &str) -> Output {
 }
 
 fn cli_path(args: &[&str], stdin: &str, path: &str) -> Output {
+    // The dev machine running the tests is usually online; the host check has its own tests in epn-core.
     let mut child = Command::new(env!("CARGO_BIN_EXE_recover"))
         .args(args)
+        .arg("--allow-unsafe-host")
         .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
