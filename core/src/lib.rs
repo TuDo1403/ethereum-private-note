@@ -25,7 +25,7 @@ pub fn unhex(s: &str) -> Result<Vec<u8>, String> {
 /// OS randomness. Failing loudly is the only safe answer: a backup made with bad randomness is worse than none.
 pub fn os_random(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
-    getrandom::getrandom(&mut b).expect("the OS random source failed; refusing to continue");
+    getrandom::fill(&mut b).expect("the OS random source failed; refusing to continue");
     b
 }
 

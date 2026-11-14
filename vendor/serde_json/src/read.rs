@@ -155,6 +155,8 @@ where
     ch: Option<u8>,
     #[cfg(feature = "raw_value")]
     raw_buffer: Option<Vec<u8>>,
+    #[cfg(feature = "raw_value")]
+    raw_buffering_start_position: Position,
 }
 
 /// JSON input source that reads from a slice of bytes.
@@ -191,12 +193,20 @@ where
     R: io::Read,
 {
     /// Create a JSON input source to read from a std::io input stream.
+    ///
+    /// When reading from a source against which short reads are not efficient, such
+    /// as a [`File`], you will want to apply your own buffering because serde_json
+    /// will not buffer the input. See [`std::io::BufReader`].
+    ///
+    /// [`File`]: std::fs::File
     pub fn new(reader: R) -> Self {
         IoRead {
             iter: LineColIterator::new(reader.bytes()),
             ch: None,
             #[cfg(feature = "raw_value")]
             raw_buffer: None,
+            #[cfg(feature = "raw_value")]
+            raw_buffering_start_position: Position { line: 1, column: 0 },
         }
     }
 }
@@ -372,6 +382,11 @@ where
 
     #[cfg(feature = "raw_value")]
     fn begin_raw_buffering(&mut self) {
+        let position = self.position();
+        self.raw_buffering_start_position = Position {
+            line: position.line,
+            column: position.column - usize::from(self.ch.is_some()),
+        };
         self.raw_buffer = Some(Vec::new());
     }
 
@@ -383,7 +398,25 @@ where
         let raw = self.raw_buffer.take().unwrap();
         let raw = match String::from_utf8(raw) {
             Ok(raw) => raw,
-            Err(_) => return error(self, ErrorCode::InvalidUnicodeCodePoint),
+            Err(err) => {
+                let prefix = &err.as_bytes()[..=err.utf8_error().valid_up_to()];
+                let line;
+                let column;
+                if let Some(last_newline) = memchr::memrchr(b'\n', prefix) {
+                    line = self.raw_buffering_start_position.line
+                        + memchr::memchr_iter(b'\n', &prefix[..last_newline]).count()
+                        + 1;
+                    column = prefix.len() - last_newline - 1;
+                } else {
+                    line = self.raw_buffering_start_position.line;
+                    column = self.raw_buffering_start_position.column + prefix.len();
+                }
+                return Err(Error::syntax(
+                    ErrorCode::InvalidUnicodeCodePoint,
+                    line,
+                    column,
+                ));
+            }
         };
         visitor.visit_map(OwnedRawDeserializer {
             raw_value: Some(raw),
@@ -641,7 +674,15 @@ impl<'a> Read<'a> for SliceRead<'a> {
         let raw = &self.slice[self.raw_buffering_start_index..self.index];
         let raw = match str::from_utf8(raw) {
             Ok(raw) => raw,
-            Err(_) => return error(self, ErrorCode::InvalidUnicodeCodePoint),
+            Err(err) => {
+                let at = self.raw_buffering_start_index + err.valid_up_to() + 1;
+                let position = self.position_of_index(at);
+                return Err(Error::syntax(
+                    ErrorCode::InvalidUnicodeCodePoint,
+                    position.line,
+                    position.column,
+                ));
+            }
         };
         visitor.visit_map(BorrowedRawDeserializer {
             raw_value: Some(raw),
@@ -860,7 +901,23 @@ where
 }
 
 fn as_str<'de, 's, R: Read<'de>>(read: &R, slice: &'s [u8]) -> Result<&'s str> {
-    str::from_utf8(slice).or_else(|_| error(read, ErrorCode::InvalidUnicodeCodePoint))
+    match str::from_utf8(slice) {
+        Ok(s) => Ok(s),
+        Err(err) => {
+            // Point at the first invalid UTF-8 byte. `read` is positioned at
+            // the closing quote of the string whose content is `slice`. If the
+            // JSON string contained escape sequences, the column position is
+            // approximate.
+            let position = read.position();
+            Err(Error::syntax(
+                ErrorCode::InvalidUnicodeCodePoint,
+                position.line,
+                position
+                    .column
+                    .saturating_sub(slice.len() - err.valid_up_to()),
+            ))
+        }
+    }
 }
 
 /// Parses a JSON escape sequence and appends it into the scratch space. Assumes
@@ -960,7 +1017,7 @@ fn parse_unicode_escape<'de, R: Read<'de>>(
 
         // This value is in range U+10000..=U+10FFFF, which is always a valid
         // codepoint.
-        let n = (((n1 - 0xD800) as u32) << 10 | (n2 - 0xDC00) as u32) + 0x1_0000;
+        let n = ((((n1 - 0xD800) as u32) << 10) | (n2 - 0xDC00) as u32) + 0x1_0000;
         push_wtf8_codepoint(n, scratch);
         return Ok(());
     }
@@ -978,7 +1035,7 @@ fn push_wtf8_codepoint(n: u32, scratch: &mut Vec<u8>) {
     scratch.reserve(4);
 
     // SAFETY: After the `reserve` call, `scratch` has at least 4 bytes of
-    // allocated but unintialized memory after its last initialized byte, which
+    // allocated but uninitialized memory after its last initialized byte, which
     // is where `ptr` points. All reachable match arms write `encoded_len` bytes
     // to that region and update the length accordingly, and `encoded_len` is
     // always <= 4.
@@ -988,19 +1045,21 @@ fn push_wtf8_codepoint(n: u32, scratch: &mut Vec<u8>) {
         let encoded_len = match n {
             0..=0x7F => unreachable!(),
             0x80..=0x7FF => {
-                ptr.write((n >> 6 & 0b0001_1111) as u8 | 0b1100_0000);
+                ptr.write(((n >> 6) & 0b0001_1111) as u8 | 0b1100_0000);
                 2
             }
             0x800..=0xFFFF => {
-                ptr.write((n >> 12 & 0b0000_1111) as u8 | 0b1110_0000);
-                ptr.add(1).write((n >> 6 & 0b0011_1111) as u8 | 0b1000_0000);
+                ptr.write(((n >> 12) & 0b0000_1111) as u8 | 0b1110_0000);
+                ptr.add(1)
+                    .write(((n >> 6) & 0b0011_1111) as u8 | 0b1000_0000);
                 3
             }
             0x1_0000..=0x10_FFFF => {
-                ptr.write((n >> 18 & 0b0000_0111) as u8 | 0b1111_0000);
+                ptr.write(((n >> 18) & 0b0000_0111) as u8 | 0b1111_0000);
                 ptr.add(1)
-                    .write((n >> 12 & 0b0011_1111) as u8 | 0b1000_0000);
-                ptr.add(2).write((n >> 6 & 0b0011_1111) as u8 | 0b1000_0000);
+                    .write(((n >> 12) & 0b0011_1111) as u8 | 0b1000_0000);
+                ptr.add(2)
+                    .write(((n >> 6) & 0b0011_1111) as u8 | 0b1000_0000);
                 4
             }
             0x11_0000.. => unreachable!(),
