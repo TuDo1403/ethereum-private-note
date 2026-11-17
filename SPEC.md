@@ -146,7 +146,7 @@ Hardware and paper shares must be given with their x, printed next to each at ba
 passphrase's x is the one with kind 01, so it needs no label). A factor given at an x of the wrong kind
 is refused.
 
-The normal way is `vault restore`: it reads every secret at a hidden prompt on the terminal. `recover` is
+The normal way is `vault restore`: it reads every secret on the terminal, words one at a time (the letters show while a word is typed and are erased once it is taken). `recover` is
 the small scriptable tool:
 
     recover restore <record-hex> [--key X=CRED_ID[@PATH]]... [--device PATH] [--allow-unsafe-host]   < factors
@@ -229,8 +229,8 @@ tell which paper or YubiKey is where. An all-paper record (c = 0) is valid: noth
   guesses against it offline, forever.
 - The record is write-once and can never be deleted. If any factor leaks, a new backup does not help,
   because the old record stays attackable: move the funds to a new seed.
-- Run `vault backup` on an offline machine. `vault` reads every secret from the terminal with echo off
-  (hidden prompts) and shows the generated ones on the terminal, so keep it out of anything that records
+- Run `vault backup` on an offline machine. `vault` reads every secret from the terminal
+  (words one at a time, erased once taken) and shows the generated ones on the terminal, so keep it out of anything that records
   the terminal. The seed is typed twice and both entries must give the same entropy; the paper share is
   typed back in full (24 words) before the backup counts as made.
 - Test the papers right after a backup with `vault restore`, option "verify only": it prints the seed

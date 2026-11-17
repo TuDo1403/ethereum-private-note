@@ -10,6 +10,24 @@ const SEED: &str = "legal winner thank year wave sausage worth useful legal winn
 // One letter off and still checksum-valid: exactly the typo a single entry would back up silently.
 const TYPO: &str = "legal winner thank year wage sausage worth useful legal winner thank yellow";
 
+/// The seed is on screen only while its words are typed (each is erased once taken); after the fingerprint
+/// that ends the entry the program must never print it, in backup or in verify-only restore. A run of four of
+/// its words in a row, however numbered or wrapped: one word alone can turn up in a random paper share.
+fn assert_seed_not_printed_back(transcript: &str) {
+    let after_entry = transcript
+        .split_once("Seed fingerprint:")
+        .expect("fingerprint")
+        .1;
+    let words: String = after_entry
+        .chars()
+        .map(|c| if c.is_ascii_alphabetic() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!words.contains("year wave sausage worth"), "seed shown");
+}
+
 const HELPERS: &str = r#"
 set timeout 300
 proc fail {msg} { puts stderr "\nFAIL: $msg"; exit 1 }
@@ -23,24 +41,23 @@ proc start {args} {
         eof { fail "unexpected end" }
     }
 }
-# rpassword prints its prompt before it turns echo off; a person types later than that, a script must
-# wait, or the pty echoes the "hidden" seed into the transcript that the test checks for leaks.
-# A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
-# echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
-proc secret {s} {
-    global spawn_out
-    for {set i 0} {$i < 200} {incr i} {
-        if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
-        sleep 0.05
-    }
-    send "$s\r"
-}
 # Menus and y/n questions (dialoguer) read keys in raw mode once drawn: wait for the prompt, pause like a
 # person, then press keys. `pick n` moves down n items and presses Enter.
 proc pick {prompt n} { expect -ex $prompt; sleep 0.3; send [string repeat "\033\[B" $n]; send "\r" }
 proc answer {prompt key} { expect -ex $prompt; expect -ex {(y/n)}; sleep 0.3; send "$key\r" }
-proc type_words {words} {
-    foreach w $words { expect -re {paper share [0-9]+, word [0-9]+/24[^:]*: }; send "$w\r" }
+# Words go in through the word picker, which reads each key as it is pressed: wait for the empty entry,
+# pause like a person, send the letters one at a time (a key sent while the terminal is between two reads
+# would be echoed by the pty), then Enter, and wait for the check mark before the next word.
+proc type_words {words {what {paper share [0-9]+}} {n 24}} {
+    set i 0
+    foreach w $words {
+        incr i
+        expect -re "$what, word $i/$n  _"
+        sleep 0.2
+        foreach c [split $w {}] { send $c; sleep 0.03 }
+        send "\r"
+        expect -re "$what, word $i/$n  ok"
+    }
 }
 proc words_of {block} {
     set out {}
@@ -60,16 +77,17 @@ proc show_paper {title} {
     return $words
 }
 # The seed typed twice; returns the fingerprint shown.
-proc enter_seed {} {
-    expect "Type your seed words"; secret $::env(SEED)
-    expect "Type them again"; secret $::env(SEED)
+proc enter_seed {{menu 1}} {
+    if {$menu} { pick "How many words is your seed?" 0 }
+    type_words [split $::env(SEED) " "] seed 12
+    type_words [split $::env(SEED) " "] {seed again} 12
     return [capture {Seed fingerprint: ([0-9a-f]{8})}]
 }
 # The generated passphrase, written down and typed back; returns it.
 proc write_passphrase {} {
     set pass [join [shown {passphrase:} 12] " "]
     expect "once it is written down"; send "\r"
-    expect "passphrase: "; send "$pass\r"
+    type_words [split $pass " "] passphrase 12
     return $pass
 }
 # Up to the first question about a share: the setup is accepted, the output folder announced (and made),
@@ -116,10 +134,11 @@ expect "make a new one: "; send "\r"
 expect "credential id: Zm9vYmFy"
 
 # Seed twice: a checksum-valid typo in the second entry is caught.
-expect "Type your seed words"; secret $env(SEED)
-expect "Type them again"; secret $env(TYPO)
+pick "How many words is your seed?" 0
+type_words [split $env(SEED) " "] seed 12
+type_words [split $env(TYPO) " "] {seed again} 12
 expect "not the same seed"
-set fp [enter_seed]
+set fp [enter_seed 0]
 set pass [write_passphrase]
 
 # The public files exist before the paper share is shown.
@@ -130,6 +149,19 @@ set paper [show_paper {paper share \(this is share 3\):}]
 
 # Typed back wrongly the paper is shown again: words that fail the checksum (Enter gives up on them),
 # then a different valid share.
+# The picker itself: a key no word can follow is refused (bell), Tab completes the word, Enter takes it,
+# and Backspace on an empty entry reopens the word before.
+expect -re {paper share [0-9]+, word 1/24  _}
+sleep 0.2
+foreach c {a b x} { send $c; sleep 0.1 }
+expect "\a"
+foreach c {a n d} { send $c; sleep 0.1 }
+expect -re {abandon.{0,8} \(Enter\)}
+send "\t"; sleep 0.1; send "\r"
+expect -re {word 1/24  ok}
+expect -re {word 2/24  _}; sleep 0.2
+send "\x7f"
+# (type_words below waits for the reopened word 1.)
 type_words [lrepeat 24 abandon]
 expect "Which word number"; send "\r"
 expect "That did not match"
@@ -147,7 +179,7 @@ restore_start $dir/record.hex
 answer "share 1: passphrase" y
 answer "share 2: YubiKey (YubiKey and its PIN)" n
 answer "share 3: paper (paper share (24 words))" y
-expect "exactly as written (hidden): "; send "$pass\r"
+type_words [split $pass " "] passphrase 12
 type_words $paper
 fingerprint_is $fp
 puts "\nDIR=$dir FP=$fp"
@@ -240,8 +272,7 @@ fn backup_then_verify_only_restore() {
         transcript.contains(&format!("FP={fp}")),
         "fingerprint shown is not the seed's"
     );
-    // The seed is never on screen (it is typed hidden), in backup or in verify-only restore.
-    assert!(!transcript.contains("sausage"), "seed shown");
+    assert_seed_not_printed_back(&transcript);
     // The test step points to verify only.
     assert!(
         transcript.contains("pick \"Verify only\""),
@@ -412,7 +443,7 @@ fn op_store_backup_and_restore() {
         transcript.contains(&format!("FP={}", seed_fp())),
         "fingerprint shown is not the seed's"
     );
-    assert!(!transcript.contains("sausage"), "seed shown");
+    assert_seed_not_printed_back(&transcript);
 
     let dir = dir_of(&work, &transcript);
     let record = record_in(&dir);
@@ -627,7 +658,7 @@ fn backup_two_keys_from_plan() {
         transcript.contains(&format!("FP={}", seed_fp())),
         "{transcript}"
     );
-    assert!(!transcript.contains("sausage"), "seed shown");
+    assert_seed_not_printed_back(&transcript);
     let dir = dir_of(&work, &transcript);
     let record = record_in(&dir);
     let h = epn_core::record::parse_record(&record).unwrap();

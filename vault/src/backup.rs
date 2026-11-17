@@ -15,7 +15,7 @@ use crate::onepassword;
 use crate::prompt::*;
 use crate::setup;
 use crate::sheet::{self, Locator};
-use epn_core::bip39::{entropy_to_words, new_passphrase, words_to_entropy};
+use epn_core::bip39::{PASSPHRASE_WORDS, entropy_to_words, new_passphrase, words_to_entropy};
 use epn_core::record::{ARGON_M_KIB, ARGON_T, new_header, pad, seal, stretch_passphrase, unseal};
 use epn_core::{fido, hex, os_random, record_id, seed_fingerprint};
 use std::io::Write;
@@ -72,30 +72,25 @@ fn save(path: &str, contents: &str) -> Result<(), String> {
 /// another list word ("wave" for "wage") passes it one time in 16 and would be backed up silently.
 /// Both entries must give the same entropy.
 fn enter_seed() -> Result<Zeroizing<Vec<u8>>, String> {
+    let sizes = [12, 15, 18, 21, 24];
+    let items = sizes.map(|n| format!("{n} words"));
+    let n = sizes[choose(
+        "How many words is your seed?",
+        &items.iter().map(String::as_str).collect::<Vec<_>>(),
+    )?];
     for _ in 0..TRIES {
-        let words = ask_hidden("Type your seed words (hidden, 12 to 24 words): ")?;
-        let first = match words_to_entropy(words.trim()) {
-            Ok(e) => Zeroizing::new(e),
-            Err(e) => {
-                println!("{e}");
-                continue;
-            }
-        };
-        let again = ask_hidden("Type them again, to catch a typo (hidden): ")?;
-        match words_to_entropy(again.trim()).map(Zeroizing::new) {
-            Ok(second) if *second == *first => {
-                println!(
-                    "Accepted: {} words, both entries match.",
-                    words.split_whitespace().count()
-                );
-                println!(
-                    "Seed fingerprint: {}  (note it: a verify-only restore must show the same)",
-                    seed_fingerprint(&first)
-                );
-                return Ok(first);
-            }
-            _ => println!("The two entries are not the same seed. Start again, slowly."),
+        let first = Zeroizing::new(words_to_entropy(&enter_words("seed", n)?)?);
+        println!("Type them again, to catch a typo:");
+        let second = Zeroizing::new(words_to_entropy(&enter_words("seed again", n)?)?);
+        if *second == *first {
+            println!("Accepted: {n} words, both entries match.");
+            println!(
+                "Seed fingerprint: {}  (note it: a verify-only restore must show the same)",
+                seed_fingerprint(&first)
+            );
+            return Ok(first);
         }
+        println!("The two entries are not the same seed. Start again, slowly.");
     }
     Err("seed not accepted".into())
 }
@@ -367,12 +362,12 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
     }
 
     println!();
-    heading("Seed (typed hidden, twice)", true);
+    heading("Seed (typed twice, word by word)", true);
     let entropy = enter_seed()?;
 
     // Generated, shown once, then proven.
     let pass = if has_pass {
-        let pass = Zeroizing::new(new_passphrase(12));
+        let pass = Zeroizing::new(new_passphrase(PASSPHRASE_WORDS));
         clear();
         heading("Passphrase (12 generated words)", true);
         println!("Write it on paper now, in lowercase, one space between words.");
@@ -382,9 +377,9 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         pause("Press Enter once it is written down; the screen will be cleared.")?;
         confirm(
             "Passphrase",
-            "Now type the passphrase from your paper (hidden). It must match exactly: lowercase, one space between words.",
+            "Now type the passphrase from your paper, word by word. It must match exactly: lowercase, one space between words.",
             &pass,
-            || ask_hidden("passphrase: "),
+            || pick_words("passphrase", PASSPHRASE_WORDS),
         )
         .map_err(|e| format!("{e}; nothing was saved"))?;
         Some(pass)
@@ -445,7 +440,7 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         pause("Press Enter once it is written down; you will type all 24 words back.")?;
         confirm(
             &format!("Share {x}"),
-            &format!("Now type share {x} back from your paper, all 24 words (hidden)."),
+            &format!("Now type share {x} back from your paper, all 24 words, word by word."),
             &words,
             || enter_paper_share(x),
         )

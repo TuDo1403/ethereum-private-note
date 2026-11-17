@@ -17,7 +17,7 @@ line, in any order, blank lines ignored:
   pass <passphrase>          the passphrase, everything after the first space, not trimmed
   paper <X> <24 words>       the paper share printed as share X
   hw <X> <64 hex digits>     a hardware secret as hex, instead of --key
-Any k of the factors restore the seed. The guided `vault restore` (hidden prompts) is the normal way;
+Any k of the factors restore the seed. The guided `vault restore` (words typed one at a time) is the normal way;
 backups are made with `vault`.";
 
 enum Fail {
