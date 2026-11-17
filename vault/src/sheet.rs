@@ -105,7 +105,7 @@ pub fn render(
          chain id:         ________\n\
          address:          __________________________________________\n\n\
          read:     cast code <address> --rpc-url <rpc>   (the code is 00, then the record)\n\
-         restore:  vault restore   (guided, hidden prompts; choose \"verify only\" for a test restore)\n\
+         restore:  vault restore   (guided, one word at a time; choose \"verify only\" for a test restore)\n\
          scripted: recover restore 0x{record}{keys}\n\
          {stdin}\
          format:   SPEC.md (print it with this sheet)\n\n\
