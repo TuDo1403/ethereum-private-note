@@ -10,15 +10,10 @@ const SEED: &str = "legal winner thank year wave sausage worth useful legal winn
 // One letter off and still checksum-valid: exactly the typo a single entry would back up silently.
 const TYPO: &str = "legal winner thank year wage sausage worth useful legal winner thank yellow";
 
-/// The seed is on screen only while its words are typed (each is erased once taken); after the fingerprint
-/// that ends the entry the program must never print it, in backup or in verify-only restore. A run of four of
-/// its words in a row, however numbered or wrapped: one word alone can turn up in a random paper share.
+/// The seed is typed hidden: not one of its words may be on screen, in backup or in verify-only restore. A run
+/// of four of its words in a row, however numbered or wrapped: one word alone can turn up in a random paper share.
 fn assert_seed_not_printed_back(transcript: &str) {
-    let after_entry = transcript
-        .split_once("Seed fingerprint:")
-        .expect("fingerprint")
-        .1;
-    let words: String = after_entry
+    let words: String = transcript
         .chars()
         .map(|c| if c.is_ascii_alphabetic() { c } else { ' ' })
         .collect::<String>()
@@ -41,22 +36,30 @@ proc start {args} {
         eof { fail "unexpected end" }
     }
 }
+# rpassword prints its prompt before it turns echo off; a person types later than that, a script must
+# wait, or the pty echoes the "hidden" seed into the transcript that the test checks for leaks.
+# A fixed 0.3 s was not enough on the slow linux-aarch64 runner, so wait until the pty really has
+# echo off (up to 10 s). If stty cannot be read the loop just runs out and we send anyway.
+proc secret {s} {
+    global spawn_out
+    for {set i 0} {$i < 200} {incr i} {
+        if {![catch {exec stty -a < $spawn_out(slave,name)} st] && [string match "*-echo *" $st]} { break }
+        sleep 0.05
+    }
+    send "$s\r"
+}
 # Menus and y/n questions (dialoguer) read keys in raw mode once drawn: wait for the prompt, pause like a
 # person, then press keys. `pick n` moves down n items and presses Enter.
 proc pick {prompt n} { expect -ex $prompt; sleep 0.3; send [string repeat "\033\[B" $n]; send "\r" }
 proc answer {prompt key} { expect -ex $prompt; expect -ex {(y/n)}; sleep 0.3; send "$key\r" }
-# Words go in through the word picker, which reads each key as it is pressed: wait for the empty entry,
-# pause like a person, send the letters one at a time (a key sent while the terminal is between two reads
-# would be echoed by the pty), then Enter, and wait for the check mark before the next word.
+# Hidden words, one per prompt: `secret` waits until the pty has echo off, so no word is echoed into the
+# transcript that the test checks for leaks.
 proc type_words {words {what {paper share [0-9]+}} {n 24}} {
     set i 0
     foreach w $words {
         incr i
-        expect -re "$what, word $i/$n  _"
-        sleep 0.2
-        foreach c [split $w {}] { send $c; sleep 0.03 }
-        send "\r"
-        expect -re "$what, word $i/$n  ok"
+        expect -re "$what, word $i/$n\[^:\]*: "
+        secret $w
     }
 }
 proc words_of {block} {
@@ -149,19 +152,6 @@ set paper [show_paper {paper share \(this is share 3\):}]
 
 # Typed back wrongly the paper is shown again: words that fail the checksum (Enter gives up on them),
 # then a different valid share.
-# The picker itself: a key no word can follow is refused (bell), Tab completes the word, Enter takes it,
-# and Backspace on an empty entry reopens the word before.
-expect -re {paper share [0-9]+, word 1/24  _}
-sleep 0.2
-foreach c {a b x} { send $c; sleep 0.1 }
-expect "\a"
-foreach c {a n d} { send $c; sleep 0.1 }
-expect -re {abandon.{0,8} \(Enter\)}
-send "\t"; sleep 0.1; send "\r"
-expect -re {word 1/24  ok}
-expect -re {word 2/24  _}; sleep 0.2
-send "\x7f"
-# (type_words below waits for the reopened word 1.)
 type_words [lrepeat 24 abandon]
 expect "Which word number"; send "\r"
 expect "That did not match"

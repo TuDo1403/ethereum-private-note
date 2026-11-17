@@ -322,7 +322,7 @@ N is depends on the setup:
    it.) It also refuses a credential id used twice. This check relies on
    `fido2-token -L -k localhost`, and has not been run against a real YubiKey yet (see
    [Limitations](#limitations)).
-2. **Seed.** Pick 12 to 24 words, then type the seed word by word (a letter no word can follow is refused, the words still possible are listed, Tab completes, Enter takes the word, Backspace on an empty word goes back), then type it again: both entries must give the same
+2. **Seed.** Choose how many words (12–24), type them one at a time (hidden), then type them again: both entries must give the same
    seed, because a typo that is another BIP39 word passes the checksum surprisingly often (1 in 16 for
    12 words). The **seed fingerprint** (8 hex digits, see `SPEC.md`) is shown; note it. Only the entropy
    is stored; your BIP39 passphrase ("25th word"), if you use one, is **not** part of the backup.
@@ -335,7 +335,7 @@ N is depends on the setup:
    disk) **before** any paper share is shown, so a crash later cannot leave you with papers and no
    record. If writing fails, `vault` says so: destroy the papers of that run and start again.
 5. **Each paper and 1Password share, one at a time.** 24 words are shown once. Write them on a *separate*
-   paper and label it *"backup share X, not a wallet"*. Then type all 24 back, word by word; a mismatch, or giving up on a word (an empty
+   paper and label it *"backup share X, not a wallet"*. Then type all 24 back (hidden); a mismatch, or giving up on a word (an empty
    answer to "Which word number"), clears the screen and shows the share again so you can correct the
    paper (three tries; the last failure ends the backup after clearing the screen). A 1Password share is shown the same way, but write it on
    a **temporary** paper labelled *"share X, for 1Password, destroy after `vault op-store`"*, kept apart
@@ -466,9 +466,9 @@ type anything, one at a time ("plug in only YubiKey B") when you hold several; i
 (another key still plugged in, a wrong PIN), you are asked to plug it in again (up to three tries; a credential id from the sheet is tried once, then you
 are asked to type it). A share kept in 1Password
 is offered from 1Password (Touch ID); if that read fails, you are asked to type the paper instead. Paper
-shares and the passphrase are entered word by word. Three attempts. Verify only also lists any share
+shares are entered word by word, the passphrase hidden. Three attempts. Verify only also lists any share
 you held that was not needed, since any k shares open the record: test such a share in another run. This
-is the normal way to restore: every secret is typed word by word at the terminal.
+is the normal way to restore: every secret is read at a hidden prompt.
 
 ### Scripted: `recover restore`
 

@@ -1,10 +1,9 @@
-//! Terminal prompts shared by backup and restore. Secrets are held in `Zeroizing`, and the screen (and its
-//! scrollback) is cleared after a secret was shown. Words are typed with `pick_word`, which shows the letters
-//! while they are typed and erases them when the word is taken; hex secrets and the like use no echo.
+//! Terminal prompts shared by backup and restore. Every secret is read with echo off and held in
+//! `Zeroizing`; the screen (and its scrollback) is cleared after a secret was shown.
 
-use console::{Key, Term, style};
+use console::style;
 use dialoguer::{Confirm, Select, theme::ColorfulTheme};
-use epn_core::bip39::{complete_word, words_to_entropy, words_with_prefix};
+use epn_core::bip39::{complete_word, words_to_entropy};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 use std::time::Duration;
@@ -22,6 +21,13 @@ pub fn ask(prompt: &str) -> Result<String, String> {
         Ok(_) => Ok(s.trim().to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Reads from the tty with echo off.
+pub fn ask_hidden(prompt: &str) -> Result<Zeroizing<String>, String> {
+    rpassword::prompt_password(prompt)
+        .map(Zeroizing::new)
+        .map_err(|e| e.to_string())
 }
 
 pub fn pause(msg: &str) -> Result<(), String> {
@@ -82,122 +88,42 @@ pub fn show_words(title: &str, words: &str) {
     }
 }
 
-/// The paper share's 24 words, each taken only once the letters name one BIP39 word (see `pick_word`).
+/// The paper share's 24 words, typed one at a time so a typo is caught on the spot (see `hidden_word`).
 pub fn enter_paper_share(x: u8) -> Result<Zeroizing<String>, String> {
     enter_words(&format!("paper share {x}"), 24)
 }
 
-/// How one word entry ended.
-enum Entry {
-    Word(&'static str),
-    /// Backspace on an empty entry: the person wants to fix the word before.
-    Back,
-}
-
-/// One BIP39 word, read key by key (like a hardware wallet's keypad) so a typo is stopped where it is made.
-/// A letter no word can follow is refused with a beep, the words still possible are listed, and Enter takes
-/// the word only once the letters name exactly one (or an exact word). Enter never fires by itself: a typo
-/// can be another real word ("wave" for "wage"), and only seeing the word before it is taken catches that.
-/// The letters are on screen while typed (needed to see them) and the line is erased when the word is
-/// taken, so no word is left in the scrollback. `console` keeps the terminal raw only around each key.
-fn pick_word(term: &Term, label: &str) -> Result<Entry, String> {
-    let io = |e: std::io::Error| e.to_string();
-    let mut typed = Zeroizing::new(String::new());
+/// One BIP39 word typed on a hidden line, asked again until it names one word. The first letters are enough
+/// (BIP39 words are unique by their first four), and the word taken is never shown, so nothing typed can be
+/// read from the screen or from a log of it.
+fn hidden_word(label: &str) -> Result<&'static str, String> {
     loop {
-        let mut out = term;
-        term.clear_line().map_err(io)?;
-        write!(out, "{label}  {}_", *typed).map_err(io)?;
-        if let Some(w) = complete_word(&typed) {
-            write!(out, "   -> {} (Enter)", style(w).green()).map_err(io)?;
-        } else if !typed.is_empty() {
-            let left = words_with_prefix(&typed);
-            let shown: Vec<_> = left.iter().take(6).copied().collect();
-            write!(out, "   {}", shown.join(" ")).map_err(io)?;
-            if left.len() > shown.len() {
-                write!(out, " +{}", left.len() - shown.len()).map_err(io)?;
-            }
+        if let Some(w) = complete_word(&ask_hidden(&format!("{label}: "))?) {
+            return Ok(w);
         }
-        out.flush().map_err(io)?;
-        match term.read_key().map_err(io)? {
-            Key::Char(c) if c.is_ascii_alphabetic() => {
-                typed.push(c.to_ascii_lowercase());
-                if words_with_prefix(&typed).is_empty() {
-                    typed.pop();
-                    write!(out, "\x07").map_err(io)?;
-                }
-            }
-            Key::Backspace if typed.pop().is_none() => return Ok(Entry::Back),
-            Key::Tab => {
-                if let Some(w) = complete_word(&typed) {
-                    typed.clear();
-                    typed.push_str(w);
-                }
-            }
-            Key::Enter => match complete_word(&typed) {
-                Some(w) => {
-                    term.clear_line().map_err(io)?;
-                    return Ok(Entry::Word(w));
-                }
-                None => write!(out, "\x07").map_err(io)?,
-            },
-            _ => {}
-        }
+        println!("  not a BIP39 word, or too short to be unique: type it again");
     }
 }
 
-/// Fills `words` up to `n` with `pick_word`; Backspace at the start of a word reopens the previous one.
-/// Each word taken leaves only a check mark on its line.
-fn pick_into(
-    term: &Term,
-    what: &str,
-    words: &mut Vec<&'static str>,
-    n: usize,
-) -> Result<(), String> {
-    let io = |e: std::io::Error| e.to_string();
-    while words.len() < n {
-        let i = words.len() + 1;
-        match pick_word(term, &format!("{what}, word {i}/{n}"))? {
-            Entry::Word(w) => {
-                words.push(w);
-                term.write_line(&format!("{what}, word {i}/{n}  ok"))
-                    .map_err(io)?;
-            }
-            Entry::Back if words.pop().is_some() => {
-                // Past the empty prompt line, and the "ok" line of the word being reopened.
-                term.clear_line().map_err(io)?;
-                term.move_cursor_up(1).map_err(io)?;
-                term.clear_line().map_err(io)?;
-            }
-            Entry::Back => {}
-        }
-    }
-    Ok(())
+fn word_label(what: &str, i: usize, n: usize, hint: &str) -> String {
+    format!("{what}, word {i}/{n}{hint}")
 }
 
-fn terminal() -> Result<Term, String> {
-    let term = Term::stdout();
-    if term.is_term() {
-        Ok(term)
-    } else {
-        Err("words are typed on a terminal".into())
-    }
-}
-
-/// `n` words typed with `pick_word`, joined by single spaces. No checksum: for the generated passphrase.
-pub fn pick_words(what: &str, n: usize) -> Result<Zeroizing<String>, String> {
-    let term = terminal()?;
-    let mut words = Vec::with_capacity(n);
-    pick_into(&term, what, &mut words, n)?;
+/// `n` words typed one at a time, joined by single spaces. No checksum: for the generated passphrase.
+pub fn type_words(what: &str, n: usize) -> Result<Zeroizing<String>, String> {
+    let words = (1..=n)
+        .map(|i| hidden_word(&word_label(what, i, n, " (first letters are enough)")))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Zeroizing::new(words.join(" ")))
 }
 
-/// `n` BIP39 words typed with `pick_word`, then the checksum is checked, so a typo is caught on the spot and
+/// `n` BIP39 words typed with `type_words`, then the checksum is checked, so a typo is caught on the spot and
 /// not after a full Argon2 run. The checksum says some word is wrong but not which one, so the person picks.
 /// An empty answer gives up: a paper that cannot be typed correctly must not trap the user here.
 pub fn enter_words(what: &str, n: usize) -> Result<Zeroizing<String>, String> {
-    let term = terminal()?;
-    let mut words = Vec::with_capacity(n);
-    pick_into(&term, what, &mut words, n)?;
+    let mut words = (1..=n)
+        .map(|i| hidden_word(&word_label(what, i, n, " (first letters are enough)")))
+        .collect::<Result<Vec<_>, _>>()?;
     loop {
         let joined = Zeroizing::new(words.join(" "));
         let Err(e) = words_to_entropy(&joined).map(Zeroizing::new) else {
@@ -213,13 +139,7 @@ pub fn enter_words(what: &str, n: usize) -> Result<Zeroizing<String>, String> {
         if let Ok(i) = answer.parse::<usize>()
             && (1..=n).contains(&i)
         {
-            // Only word i is typed again; Backspace on its empty entry has nothing before it to reopen.
-            loop {
-                if let Entry::Word(w) = pick_word(&term, &format!("{what}, word {i}/{n}"))? {
-                    words[i - 1] = w;
-                    break;
-                }
-            }
+            words[i - 1] = hidden_word(&word_label(what, i, n, ""))?;
         }
     }
 }
