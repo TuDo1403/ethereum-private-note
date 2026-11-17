@@ -362,7 +362,7 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
     }
 
     println!();
-    heading("Seed (typed twice, word by word)", true);
+    heading("Seed (typed hidden, twice)", true);
     let entropy = enter_seed()?;
 
     // Generated, shown once, then proven.
@@ -377,9 +377,9 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         pause("Press Enter once it is written down; the screen will be cleared.")?;
         confirm(
             "Passphrase",
-            "Now type the passphrase from your paper, word by word. It must match exactly: lowercase, one space between words.",
+            "Now type the passphrase from your paper (hidden). It must match exactly: lowercase, one space between words.",
             &pass,
-            || pick_words("passphrase", PASSPHRASE_WORDS),
+            || type_words("passphrase", PASSPHRASE_WORDS),
         )
         .map_err(|e| format!("{e}; nothing was saved"))?;
         Some(pass)
@@ -440,7 +440,7 @@ pub fn backup(setup: Option<String>, device: Option<String>) -> Result<(), Strin
         pause("Press Enter once it is written down; you will type all 24 words back.")?;
         confirm(
             &format!("Share {x}"),
-            &format!("Now type share {x} back from your paper, all 24 words, word by word."),
+            &format!("Now type share {x} back from your paper, all 24 words (hidden)."),
             &words,
             || enter_paper_share(x),
         )

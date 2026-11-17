@@ -23,7 +23,7 @@ use prompt::{choose, clear};
 use std::io::IsTerminal;
 
 /// Guided, offline seed backup and restore (Ethereum Private Note). Without a command, shows a menu.
-/// Secrets are only ever typed at prompts, never given as arguments.
+/// Secrets are only ever typed at hidden prompts, never given as arguments.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {

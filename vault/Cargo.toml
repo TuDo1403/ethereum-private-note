@@ -13,8 +13,9 @@ workspace = true
 # format in SPEC.md stand alone.
 [dependencies]
 epn-core = { path = "../core" }
+rpassword = "=7.5.5"  # hidden prompts on the tty
 zeroize = "=1.9.1"    # wipe seed, passphrase and key material after use
-# Terminal UX only (never on the restore path: `recover` stays tiny).
+# Terminal UX only (never on the restore path: `recover` stays tiny). Secrets are still read with rpassword.
 clap = { version = "=4.6.7", features = ["derive"] }  # arguments, --help
 console = "=0.16.6"                                   # colors (honours NO_COLOR) and the terminal
 dialoguer = { version = "=0.12.0", default-features = false }  # arrow-key menus and confirmations

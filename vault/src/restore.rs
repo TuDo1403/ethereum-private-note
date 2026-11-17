@@ -1,5 +1,5 @@
 //! `vault restore`: asks which factors you hold and walks through each, for any record the format allows.
-//! Words are typed one at a time, never as arguments; "verify only" prints the seed fingerprint and never the seed.
+//! Secrets are read at hidden prompts; "verify only" prints the seed fingerprint and never the seed.
 
 use crate::onepassword::{self, split_reference, title};
 use crate::prompt::*;
@@ -198,7 +198,7 @@ pub fn restore_flow(device: Option<String>) -> Result<(), String> {
         for &x in &redo {
             println!();
             let secret = match kind(x) {
-                Kind::Passphrase => pick_words("passphrase", PASSPHRASE_WORDS)?,
+                Kind::Passphrase => type_words("passphrase", PASSPHRASE_WORDS)?,
                 // A paper share given up on is left out: the other shares may still open the record.
                 _ => match paper_share(x, on_sheet(x)) {
                     Ok(words) => words,

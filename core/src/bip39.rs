@@ -82,16 +82,6 @@ pub fn complete_word(typed: &str) -> Option<&'static str> {
     }
 }
 
-/// Every BIP39 word that starts with `prefix` (already lowercase), in list order. A word picker uses it to
-/// refuse a key that no word can follow and to show what is left to choose from.
-pub fn words_with_prefix(prefix: &str) -> Vec<&'static str> {
-    WORDS
-        .iter()
-        .copied()
-        .filter(|w| w.starts_with(prefix))
-        .collect()
-}
-
 /// The passphrase is generated with this many words (132 bits); restore asks for exactly as many.
 pub const PASSPHRASE_WORDS: usize = 12;
 
@@ -146,17 +136,6 @@ mod tests {
             complete_word("  ABAND "),
             Some("abandon"),
             "case and surrounding spaces are forgiven"
-        );
-    }
-
-    #[test]
-    fn prefixes_list_what_can_follow() {
-        assert_eq!(words_with_prefix("aba"), ["abandon"]);
-        assert_eq!(words_with_prefix("add"), ["add", "addict", "address"]);
-        assert_eq!(words_with_prefix("").len(), 2048);
-        assert!(
-            words_with_prefix("abx").is_empty(),
-            "no word can follow: the key is refused"
         );
     }
 }
